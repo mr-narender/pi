@@ -72,6 +72,9 @@ test('chat HTML authorizes only the entry script and gives lazy modules remote-s
     '0.2.28'
   );
   const dom = new JSDOM(html);
+  assert.deepEqual(JSON.parse(dom.window.document.body.dataset.vscodeContext!), {
+    preventDefaultContextMenuItems: true,
+  });
   const scripts = dom.window.document.querySelectorAll('script');
   assert.equal(scripts.length, 1, 'optional engines must not appear as eager script elements');
   assert.match(scripts[0]!.src, /chat\.js\?v=0\.2\.28$/);

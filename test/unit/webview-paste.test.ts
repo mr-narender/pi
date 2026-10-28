@@ -1004,3 +1004,185 @@ test('MCP Check button sends one explicit local request and preserves the compos
     false
   );
 });
+
+test('reply selection survives updates and copies only the selected text', async () => {
+  const selection = dom.window.getSelection()!;
+  selection.removeAllRanges();
+  const original = snapshot({
+    sequence: 9000,
+    focus: 'none',
+    typewriterSpeed: 'off',
+    messages: [
+      { id: 'copy-reply', role: 'assistant', text: 'Keep this selected text.', attachments: [] },
+    ],
+  });
+  dom.window.dispatchEvent(
+    new dom.window.MessageEvent('message', {
+      data: { type: 'snapshot', snapshot: original },
+    })
+  );
+  const paragraph = dom.window.document.querySelector('[data-mid="copy-reply"] p')!;
+  const range = dom.window.document.createRange();
+  range.setStart(paragraph.firstChild!, 10);
+  range.setEnd(paragraph.firstChild!, 23);
+  selection.addRange(range);
+  assert.equal(selection.toString(), 'selected text');
+
+  dom.window.dispatchEvent(
+    new dom.window.MessageEvent('message', {
+      data: {
+        type: 'snapshot',
+        snapshot: {
+          ...original,
+          sequence: 9001,
+          messages: [
+            { ...original.messages[0]!, text: 'Keep this selected text. More output arrived.' },
+          ],
+        },
+      },
+    })
+  );
+  assert.equal(selection.toString(), 'selected text', 'updates must retain the selected DOM');
+  const copied = new Map<string, string>();
+  const event = new dom.window.Event('copy', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', {
+    value: { setData: (type: string, value: string) => copied.set(type, value) },
+  });
+  paragraph.dispatchEvent(event);
+  assert.equal(copied.get('text/plain'), 'selected text');
+  assert.equal(event.defaultPrevented, true);
+
+  selection.removeAllRanges();
+  dom.window.document.dispatchEvent(new dom.window.Event('selectionchange'));
+  await waitFor(
+    () =>
+      dom.window.document
+        .querySelector('[data-mid="copy-reply"]')!
+        .textContent!.includes('More output arrived.'),
+    'latest reply after clearing selection'
+  );
+});
+
+test('chat suppresses the default context menu without intercepting composer copy or paste', () => {
+  const composer = findComposer();
+  composer.value = 'retain this draft';
+  composer.setSelectionRange(0, 6);
+  const copy = new dom.window.Event('copy', { bubbles: true, cancelable: true });
+  const paste = pasteEvent([], { 'text/plain': 'pasted text' });
+  composer.dispatchEvent(copy);
+  composer.dispatchEvent(paste);
+  assert.equal(copy.defaultPrevented, false, 'native input copy remains available');
+  assert.equal(paste.defaultPrevented, false, 'native plain-text paste remains available');
+  for (const target of [composer, dom.window.document.querySelector('[data-mid="copy-reply"]')!]) {
+    const menu = new dom.window.MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+    });
+    target.dispatchEvent(menu);
+    assert.equal(menu.defaultPrevented, true, 'chat must suppress the default right-click menu');
+  }
+});
+
+test('streaming animation retains a selected reply and catches up after selection clears', async () => {
+  const selection = dom.window.getSelection()!;
+  selection.removeAllRanges();
+  const live = snapshot({
+    sequence: 9100,
+    focus: 'none',
+    isStreaming: true,
+    connectionState: 'busy',
+    currentAssistantMessageId: 'stream-copy',
+    typewriterSpeed: 'fast',
+    messages: [
+      {
+        id: 'stream-copy',
+        role: 'assistant',
+        text: 'Select this streaming response. '.repeat(6),
+        attachments: [],
+      },
+    ],
+  });
+  dom.window.dispatchEvent(
+    new dom.window.MessageEvent('message', {
+      data: { type: 'snapshot', snapshot: live },
+    })
+  );
+  await waitFor(
+    () =>
+      dom.window.document.querySelector('.js-stream-text p')?.textContent?.startsWith('Select') ===
+      true,
+    'streamed prefix'
+  );
+  const paragraph = dom.window.document.querySelector('.js-stream-text p')!;
+  assert.equal(paragraph.closest('.message-card')?.getAttribute('data-mid'), 'stream-copy');
+  const range = dom.window.document.createRange();
+  range.setStart(paragraph.firstChild!, 0);
+  range.setEnd(paragraph.firstChild!, 6);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  assert.equal(selection.toString(), 'Select', 'streaming selection starts on the visible prefix');
+  const latest = {
+    ...live,
+    sequence: 9101,
+    messages: [{ ...live.messages[0]!, text: live.messages[0]!.text + 'Latest output.' }],
+  };
+  dom.window.dispatchEvent(
+    new dom.window.MessageEvent('message', {
+      data: { type: 'snapshot', snapshot: latest },
+    })
+  );
+  assert.equal(selection.toString(), 'Select', 'the streaming snapshot retains the selection');
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(selection.toString(), 'Select', 'animation ticks cannot destroy the selection');
+  selection.removeAllRanges();
+  dom.window.document.dispatchEvent(new dom.window.Event('selectionchange'));
+  dom.window.dispatchEvent(
+    new dom.window.MessageEvent('message', {
+      data: {
+        type: 'snapshot',
+        snapshot: { ...latest, sequence: 9102, isStreaming: false, connectionState: 'ready' },
+      },
+    })
+  );
+  await waitFor(
+    () =>
+      dom.window.document
+        .querySelector('[data-mid="stream-copy"]')
+        ?.textContent?.includes('Latest output.') === true,
+    'buffered streaming output'
+  );
+});
+
+test('starting a reply drag does not restore composer focus during a snapshot', () => {
+  dom.window.getSelection()!.removeAllRanges();
+  const before = Object.getOwnPropertyDescriptor(dom.window.document, 'hasFocus');
+  Object.defineProperty(dom.window.document, 'hasFocus', { configurable: true, value: () => true });
+  try {
+    const base = snapshot({ sequence: 9200, focus: 'none', typewriterSpeed: 'off' });
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent('message', { data: { type: 'snapshot', snapshot: base } })
+    );
+    const composer = findComposer();
+    composer.focus();
+    const paragraph = dom.window.document.querySelector('[data-mid="m2"] p')!;
+    paragraph.dispatchEvent(new dom.window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+    let focusCalls = 0;
+    const nativeFocus = composer.focus;
+    composer.focus = () => {
+      focusCalls += 1;
+    };
+    composer.blur();
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        data: { type: 'snapshot', snapshot: { ...base, sequence: 9201, focus: 'composer' } },
+      })
+    );
+    composer.focus = nativeFocus;
+    assert.equal(focusCalls, 0, 'the first drag movement must not compete with composer focus');
+  } finally {
+    dom.window.dispatchEvent(new dom.window.MouseEvent('pointerup', { bubbles: true }));
+    if (before) Object.defineProperty(dom.window.document, 'hasFocus', before);
+    else Reflect.deleteProperty(dom.window.document, 'hasFocus');
+  }
+});

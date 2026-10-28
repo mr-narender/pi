@@ -32,7 +32,7 @@ export function renderChatWebviewHtml(
     <link rel="stylesheet" href="${styleUri}" />
     <title>${title}</title>
   </head>
-  <body>
+  <body data-vscode-context='{"preventDefaultContextMenuItems":true}'>
     <div id="app"></div>
     <script nonce="${nonce}" src="${scriptUri}" data-mermaid-src="${mermaidUri}" data-highlight-src="${highlightUri}"></script>
   </body>
