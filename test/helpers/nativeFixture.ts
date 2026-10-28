@@ -24,7 +24,12 @@ export async function resolveNativeCli(selection: 'supported-sdk' | 'path-cli' =
   if (selection !== 'supported-sdk' && selection !== 'path-cli')
     throw new Error('Unowned native runtime selection');
   const candidates = [
-    ...(selection === 'supported-sdk' ? [resolve('.github/pi-sdk/node_modules/.bin')] : []),
+    // CI's PATH CLI is the locked Pi 1.3 fixture, independent of the host installation.
+    resolve(
+      selection === 'supported-sdk'
+        ? '.github/pi-sdk/node_modules/.bin'
+        : '.github/pi-sdk-13/node_modules/.bin'
+    ),
     ...(process.env.PATH || '').split(sep === '/' ? ':' : ';'),
   ];
   for (const directory of candidates) {

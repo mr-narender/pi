@@ -32,6 +32,60 @@ import {
 
 const vscode = acquireVsCodeApi();
 const root = document.getElementById('app');
+let selectingReply: HTMLElement | undefined;
+let replyUpdateDeferred = false;
+
+function transcriptSelection(): Selection | undefined {
+  const selection = window.getSelection();
+  const messages = document.getElementById('messages');
+  return selection &&
+    !selection.isCollapsed &&
+    selection.rangeCount > 0 &&
+    messages &&
+    (messages.contains(selection.anchorNode) || messages.contains(selection.focusNode))
+    ? selection
+    : undefined;
+}
+
+function holdsReply(node: Node): boolean {
+  return (
+    !!(selectingReply && (node.contains(selectingReply) || selectingReply.contains(node))) ||
+    transcriptSelection()?.getRangeAt(0).intersectsNode(node) === true
+  );
+}
+
+function resumeReplyUpdates(): void {
+  if (!replyUpdateDeferred || selectingReply || transcriptSelection() || !currentSnapshot) return;
+  replyUpdateDeferred = false;
+  const snapshot =
+    currentSnapshot.composerResetSeq === lastComposerResetSeq
+      ? { ...currentSnapshot, draft: composerField()?.value ?? currentSnapshot.draft }
+      : currentSnapshot;
+  render(snapshot);
+}
+
+root?.addEventListener('pointerdown', (event) => {
+  const target = event.target as HTMLElement;
+  if (
+    event.button === 0 &&
+    !target.closest('button, input, textarea, select, summary, a, [contenteditable]')
+  )
+    selectingReply = target.closest<HTMLElement>('#messages .message-card') ?? undefined;
+});
+for (const name of ['pointerup', 'pointercancel', 'blur'])
+  window.addEventListener(name, () => {
+    selectingReply = undefined;
+    resumeReplyUpdates();
+  });
+document.addEventListener('selectionchange', resumeReplyUpdates);
+root?.addEventListener('copy', (event) => {
+  if ((event.target as HTMLElement).closest('input, textarea, [contenteditable]')) return;
+  const selection = transcriptSelection();
+  if (!selection || !event.clipboardData) return;
+  event.clipboardData.setData('text/plain', selection.toString());
+  event.preventDefault();
+});
+root?.addEventListener('contextmenu', (event) => event.preventDefault());
 type ActivityTab = 'output' | 'sources' | 'agents';
 const activityTabs = new Map<string, ActivityTab>();
 const disclosureOpen = new Map<string, boolean>();
@@ -93,6 +147,7 @@ function restoreInspectorFocus(focused: HTMLElement | undefined): void {
   if (
     focused?.isConnected &&
     document.activeElement === document.body &&
+    !selectingReply &&
     window.getSelection()?.isCollapsed !== false
   )
     focused.focus({ preventScroll: true });
@@ -1900,6 +1955,11 @@ function renderNow(snapshot: WebviewSnapshot): void {
       `<div id="app">${renderChatApp(modelToolsView(snapshot), streamMessageId)}</div>`,
       {
         onBeforeElUpdated(from, to) {
+          // Replacing selected text nodes collapses Chromium's native copy range.
+          if (sameComposer && from.matches('.message-card') && holdsReply(from)) {
+            replyUpdateDeferred = true;
+            return false;
+          }
           // Do not temporarily hide the selected inspector tab: that blurs its
           // focused disclosure before selectActivityTab restores the selection.
           if (sameDisclosureSession && from.hasAttribute('data-activity-view'))
@@ -1934,6 +1994,18 @@ function renderNow(snapshot: WebviewSnapshot): void {
             from.id === 'pi-working' &&
             from.getAttribute('data-anim') === to.getAttribute('data-anim')
           );
+        },
+        onBeforeNodeDiscarded(node) {
+          if (
+            sameComposer &&
+            node instanceof HTMLElement &&
+            node.matches('.message-card') &&
+            holdsReply(node)
+          ) {
+            replyUpdateDeferred = true;
+            return false;
+          }
+          return true;
         },
       }
     );
@@ -1975,13 +2047,13 @@ function renderNow(snapshot: WebviewSnapshot): void {
   restoreMermaidDialog();
 
   const textarea = document.getElementById(COMPOSER_FIELD_ID) as HTMLTextAreaElement | null;
-  const transcriptSelection = window.getSelection()?.isCollapsed === false;
+  const hasTranscriptSelection = !!selectingReply || !!transcriptSelection();
   if (
     textarea &&
     composerWasFocused &&
     !authoritativeReset &&
     document.hasFocus() &&
-    !transcriptSelection
+    !hasTranscriptSelection
   ) {
     if (document.activeElement !== textarea) textarea.focus();
     const caret = preservedStart ?? textarea.value.length;
@@ -1996,7 +2068,7 @@ function renderNow(snapshot: WebviewSnapshot): void {
     composerWasFocused &&
     authoritativeReset &&
     document.hasFocus() &&
-    !transcriptSelection
+    !hasTranscriptSelection
   ) {
     textarea.focus();
     const end = textarea.value.length;
@@ -2991,6 +3063,10 @@ let streamPaintedText = '';
 function paintStream(node: HTMLElement): void {
   const revealed = streamRaw.slice(0, streamRevealLen);
   if (streamPaintedNode === node && streamPaintedText === revealed) return;
+  if (holdsReply(node)) {
+    replyUpdateDeferred = true;
+    return;
+  }
   const diagrams = Array.from(node.querySelectorAll<HTMLElement>('.mermaid-wrap'));
   node.innerHTML = renderRichText(revealed, true);
   Array.from(node.querySelectorAll<HTMLElement>('.mermaid-wrap')).forEach((wrap, index) => {
@@ -3428,7 +3504,7 @@ function applyFocus(): void {
   if (focusElement(pendingTargetId) || focusElement(pendingFallbackId)) {
     return;
   }
-  if (!currentSnapshot.preview && window.getSelection()?.isCollapsed === false) return;
+  if (!currentSnapshot.preview && (selectingReply || transcriptSelection())) return;
   if (!currentSnapshot.preview && document.activeElement?.closest('[data-outbox-id]')) return;
   if (!currentSnapshot.preview && document.activeElement?.closest('[data-model-tools]')) return;
   if (!currentSnapshot.preview && document.activeElement?.closest('.approval-card')) return;
