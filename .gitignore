@@ -14,3 +14,6 @@ vendor/
 /debug-status.md
 /settings-correction-native-control-matrix.md
 /settings-correction-status.md
+
+# Generated graphify output (tool retired by owner)
+graphify-out/
