@@ -18,6 +18,6 @@ Closed with: `e7b2604`
 
 ## Context
 
-Direct task requested by the user. Repository is local-only at `~/dev/pi-extension`; development occurs in the Worktrunk task worktree.
+Direct task requested by the user. Repository is local-only at `~/Developer/pi-extension`; development occurs in the Worktrunk task worktree.
 
 All acceptance criteria were independently verified. The packaged VSIX was installed as `local.pi-rpc-vscode@0.0.1` and the VS Code window was launched for manual use.

@@ -10,7 +10,7 @@ import { shutdown, spawnRealPi } from '../helpers/rpc';
 
 const execFileAsync = promisify(execFile);
 
-const WORKFLOW_REPO = '/Users/narender/dev/agent-registry';
+const WORKFLOW_REPO = '/Users/narender/Developer/agent-registry';
 const workflowBranchExists = (() => {
   try {
     execSync(`git -C ${WORKFLOW_REPO} rev-parse --verify --quiet origin/feat/pi-agent-workflow`, {
@@ -29,7 +29,7 @@ test(
     const root = await mkdtemp(join(tmpdir(), 'pi-agent-workflow-'));
     await execFileAsync('bash', [
       '-lc',
-      `git -C /Users/narender/dev/agent-registry archive --format=tar --prefix=pi-agent-workflow/ origin/feat/pi-agent-workflow:pi-agent-workflow | tar -xf - -C ${JSON.stringify(root)}`,
+      `git -C ${WORKFLOW_REPO} archive --format=tar --prefix=pi-agent-workflow/ origin/feat/pi-agent-workflow:pi-agent-workflow | tar -xf - -C ${JSON.stringify(root)}`,
     ]);
     const spawned = await spawnRealPi(['-e', join(root, 'pi-agent-workflow')]);
     try {
