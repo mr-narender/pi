@@ -104,7 +104,7 @@ Acceptance: images are validated and never logged; editor context is explicit; s
 1. Install a reviewed test Pi package into the isolated agent directory containing one extension command, skill, prompt, status/widget UI, and custom tool. Start in trusted workspace.
 2. Confirm `get_commands` provenance and direct invocation of extension, prompt, and skill commands. Confirm custom tool events and UI methods render.
 3. Disable resources/project trust and restart; verify discovery changes only after restart.
-4. For `pi-agent-workflow`, set `AGENT_REGISTRY_ROOT` to a reviewed checkout that contains remote-tracking branch `origin/feat/pi-agent-workflow` (current local acceptance source: `/Users/narender/dev/agent-registry`). Record `git -C "$AGENT_REGISTRY_ROOT" rev-parse origin/feat/pi-agent-workflow` in the evidence.
+4. For `pi-agent-workflow`, set `AGENT_REGISTRY_ROOT` to a reviewed checkout that contains remote-tracking branch `origin/feat/pi-agent-workflow` (current local acceptance source: `/Users/narender/Developer/agent-registry`). Record `git -C "$AGENT_REGISTRY_ROOT" rev-parse origin/feat/pi-agent-workflow` in the evidence.
 5. Extract a deterministic temporary compatibility fixture, without referencing the checkout path from product code or checked-in settings:
    ```bash
    WORKFLOW_FIXTURE_ROOT="$(mktemp -d)"
