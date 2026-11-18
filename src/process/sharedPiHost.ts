@@ -402,7 +402,7 @@ export class SharedPiHost {
   }
 
   private warmingPool = false;
-  private warmupLaunch?: SdkSessionOpen;
+  private neutralLaunch?: SdkSessionOpen;
   private readonly pendingWarmups = new Map<
     string,
     { prewarmCwd?: string; launch?: SdkSessionOpen }
@@ -414,15 +414,15 @@ export class SharedPiHost {
    * Queue other folders behind the current warmup, retaining each exact launch.
    * User opens arriving mid-warmup ride the currently-booting compatible worker.
    */
-  public warmPool(prewarmCwd?: string, launch = this.warmupLaunch): void {
+  public warmPool(prewarmCwd?: string, launch?: SdkSessionOpen): void {
     if (this.disposed) return;
     if (prewarmCwd && launch) this.prewarmLaunches.set(prewarmCwd, launch);
+    if (!prewarmCwd && launch) this.neutralLaunch = launch;
     if (this.warmingPool) {
       this.pendingWarmups.set(launch?.cwd ?? '', { prewarmCwd, launch });
       return;
     }
     this.warmingPool = true;
-    this.warmupLaunch = launch;
     void (async () => {
       try {
         if (!launch?.sdkRoot) {
@@ -533,27 +533,38 @@ export class SharedPiHost {
       // Reserve synchronously: SDK resolution may yield to another New Chat.
       if (parked) this.parked.delete(info.cwd);
       let adopted = false;
+      let stale = false;
       try {
-        if (
-          parked &&
-          !parked.conn.fault &&
-          JSON.stringify(info.args ?? ['--mode', 'rpc', '--no-approve']) ===
-            JSON.stringify(parked.info.args ?? ['--mode', 'rpc', '--no-approve']) &&
-          parked.conn.piRoot === (info.sdkRoot ?? (await this.resolvePiRoot())) &&
-          parked.conn.matchesEnvironmentKey(
-            HostWorkerConn.computeEnvKey(info.env ?? this.baseEnv),
-            info.cwd
-          )
-        ) {
-          adopted = true;
-          this.schedulePrewarm(info.cwd);
-          this.logger.info(`Adopted prewarmed Pi session for ${info.cwd}`);
-          onOpening?.(parked.handle);
-          return parked.handle;
+        if (parked) {
+          const latest = this.prewarmLaunches.get(info.cwd);
+          const matches = (launch: SdkSessionOpen): boolean =>
+            JSON.stringify(launch.args ?? ['--mode', 'rpc', '--no-approve']) ===
+              JSON.stringify(parked.info.args ?? ['--mode', 'rpc', '--no-approve']) &&
+            (launch.sdkRoot === undefined || launch.sdkRoot === parked.conn.piRoot) &&
+            parked.conn.matchesEnvironmentKey(
+              HostWorkerConn.computeEnvKey(launch.env ?? this.baseEnv),
+              info.cwd
+            );
+          stale =
+            !!parked.conn.fault || !matches(info) || (latest !== undefined && !matches(latest));
+          if (!stale) {
+            stale = parked.conn.piRoot !== (info.sdkRoot ?? (await this.resolvePiRoot()));
+          }
+          if (!stale) {
+            adopted = true;
+            this.schedulePrewarm(info.cwd);
+            this.logger.info(`Adopted prewarmed Pi session for ${info.cwd}`);
+            onOpening?.(parked.handle);
+            return parked.handle;
+          }
         }
       } finally {
-        if (parked && !adopted && !this.disposed && !this.parked.has(info.cwd)) {
-          this.parked.set(info.cwd, parked);
+        if (parked && !adopted) {
+          if (stale) {
+            void parked.handle.stop();
+          } else if (!this.disposed && !this.parked.has(info.cwd)) {
+            this.parked.set(info.cwd, parked);
+          }
         }
       }
     }
@@ -668,6 +679,7 @@ export class SharedPiHost {
     for (const timer of this.prewarmTimers.values()) clearTimeout(timer);
     this.prewarmTimers.clear();
     this.prewarmLaunches.clear();
+    this.neutralLaunch = undefined;
     this.pendingWarmups.clear();
     this.parked.clear();
     for (const conn of [...this.conns]) {
@@ -707,7 +719,8 @@ export class SharedPiHost {
       }
     }
     if (recycled > 0) {
-      this.warmPool();
+      if (this.neutralLaunch) this.warmPool(undefined, this.neutralLaunch);
+      else for (const [cwd, launch] of this.prewarmLaunches) this.warmPool(cwd, launch);
     }
     return { recycled, stillBusy };
   }
