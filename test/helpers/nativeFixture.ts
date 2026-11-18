@@ -23,15 +23,21 @@ import { isSupportedPiSdkVersion } from '../../src/process/piLauncher';
 export async function resolveNativeCli(selection: 'supported-sdk' | 'path-cli' = 'supported-sdk') {
   if (selection !== 'supported-sdk' && selection !== 'path-cli')
     throw new Error('Unowned native runtime selection');
-  const candidates = [
-    // CI's PATH CLI is the locked Pi 1.3 fixture, independent of the host installation.
-    resolve(
-      selection === 'supported-sdk'
-        ? '.github/pi-sdk/node_modules/.bin'
-        : '.github/pi-sdk-13/node_modules/.bin'
-    ),
-    ...(process.env.PATH || '').split(sep === '/' ? ':' : ';'),
-  ];
+  // Explicit matrix selection never silently falls back to another SDK.
+  // Default discovery checks fixtures first, then PATH, admitting any in-range SDK.
+  const selected = process.env.PI_TEST_SDK;
+  if (selected && !['13', '15', 'path'].includes(selected))
+    throw new Error('PI_TEST_SDK must be 13, 15 or path');
+  const pathBins = (process.env.PATH || '').split(sep === '/' ? ':' : ';');
+  const candidates = selected
+    ? selected === 'path'
+      ? pathBins
+      : [resolve(`.github/pi-sdk-${selected}/node_modules/.bin`)]
+    : [
+        resolve('.github/pi-sdk-15/node_modules/.bin'),
+        resolve('.github/pi-sdk-13/node_modules/.bin'),
+        ...pathBins,
+      ];
   for (const directory of candidates) {
     try {
       const cli = await realpath(join(directory, 'pi'));
@@ -39,7 +45,7 @@ export async function resolveNativeCli(selection: 'supported-sdk' | 'path-cli' =
       const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
       if (
         pkg.name !== '@earendil-works/pi-coding-agent' ||
-        (selection === 'supported-sdk' && !isSupportedPiSdkVersion(pkg.version)) ||
+        !isSupportedPiSdkVersion(pkg.version) ||
         pkg.bin?.pi !== 'dist/bundle/cli.js'
       )
         continue;
@@ -52,8 +58,11 @@ export async function resolveNativeCli(selection: 'supported-sdk' | 'path-cli' =
   throw new Error('Requires an installed supported @earendil-works/pi-coding-agent JS CLI');
 }
 
-export async function readNativeRpcTypes(sdkRoot = process.env.PI_SRC) {
-  const root = sdkRoot ?? (await resolveNativeCli()).root;
+export async function readNativeRpcTypes(sdkRoot?: string) {
+  const root =
+    sdkRoot ??
+    (!process.env.PI_TEST_SDK ? process.env.PI_SRC : undefined) ??
+    (await resolveNativeCli()).root;
   return readFile(join(root, 'dist/modes/rpc/rpc-types.d.ts'), 'utf8');
 }
 
@@ -359,11 +368,8 @@ export async function createNativeFixture(
   )
     throw new Error('Unowned selected SDK profile');
   const sdk = await resolveNativeCli(runtime === 'selected-sdk' ? 'path-cli' : runtime);
-  if (
-    runtime === 'selected-sdk' &&
-    (sdk.version !== '1.3.0' || !isSupportedPiSdkVersion(sdk.version))
-  )
-    throw new Error('Selected SDK fixture requires the audited Pi 1.3.0 candidate');
+  if (runtime === 'selected-sdk' && !isSupportedPiSdkVersion(sdk.version))
+    throw new Error('Selected SDK fixture requires a supported Pi SDK candidate');
   const selectedIdentity = await sdkIdentity(sdk);
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-native-isolated-')));
   await chmod(root, 0o700);
@@ -885,6 +891,7 @@ export async function nativeSdkHostPlan(
     const assets = state.hostAssets ?? new Map<string, Buffer>();
     for (const name of [
       'pi-multi-host.mjs',
+      'llama-builtin.mjs',
       'scoped-models.mjs',
       'startup-adapter.mjs',
       'preferences.mjs',

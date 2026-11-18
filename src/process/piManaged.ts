@@ -5,10 +5,10 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { DiagnosticsLogger } from '../diagnostics/logger';
 import { getSettings } from '../config/settings';
-import { isSupportedPiSdkVersion, SUPPORTED_PI_SDK_VERSIONS } from './piLauncher';
+import { isSupportedPiSdkVersion, MANAGED_PI_TARGET } from './piLauncher';
 
 const PI_PACKAGE = '@earendil-works/pi-coding-agent';
-const MANAGED_PI_VERSION = SUPPORTED_PI_SDK_VERSIONS.at(-1)!;
+const MANAGED_PI_VERSION = MANAGED_PI_TARGET;
 
 function managedDir(context: vscode.ExtensionContext): string {
   return join(context.globalStorageUri.fsPath, 'pi');

@@ -77,8 +77,8 @@ test('managed Pi rejects an installed SDK outside the audited host contract', as
 
 test('auto-install off never applies an already staged managed update', async () => {
   const storage = mkdtempSync(join(tmpdir(), 'pi-managed-consent-'));
-  const live = writeManaged(storage, 'pi', '1.0.0');
-  writeManaged(storage, 'pi/staging', '1.0.4');
+  const live = writeManaged(storage, 'pi', '1.3.0');
+  writeManaged(storage, 'pi/staging', '1.5.2');
   try {
     const ensureManagedPi = await loadManaged(false);
     const cli = await ensureManagedPi(
@@ -86,7 +86,7 @@ test('auto-install off never applies an already staged managed update', async ()
       { info() {}, warn() {}, error() {} }
     );
     assert.equal(cli, join(live, 'dist', 'cli.js'));
-    assert.equal(JSON.parse(readFileSync(join(live, 'package.json'), 'utf8')).version, '1.0.0');
+    assert.equal(JSON.parse(readFileSync(join(live, 'package.json'), 'utf8')).version, '1.3.0');
     assert.equal(
       JSON.parse(
         String(
@@ -96,14 +96,14 @@ test('auto-install off never applies an already staged managed update', async ()
           )
         )
       ).version,
-      '1.0.4'
+      '1.5.2'
     );
   } finally {
     rmSync(storage, { recursive: true, force: true });
   }
 });
 
-for (const version of ['1.1.0', '1.2.0', '1.3.0']) {
+for (const version of ['1.3.0', '1.5.0', '1.5.2']) {
   test(`managed Pi ${version} is reused with auto-install off`, async () => {
     const storage = mkdtempSync(join(tmpdir(), 'pi-managed-supported-'));
     const live = writeManaged(storage, 'pi', version);

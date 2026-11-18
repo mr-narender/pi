@@ -12,12 +12,18 @@ export function resolveSdkDependencyFile(sdkRoot, dependencyFile) {
   }
 }
 
+/**
+ * Semver range gate: >=1.3.0 <2.0.0.  The thin SDK host depends on stable
+ * public API surface verified against fixtures 1.3.0 and 1.5.2.
+ */
 export function validateSdkMetadata(metadata) {
-  if (
-    metadata.name !== '@earendil-works/pi-coding-agent' ||
-    !['0.99.1', '0.99.2', '1.0.0', '1.0.4', '1.1.0', '1.2.0', '1.3.0'].includes(metadata.version)
-  )
+  if (metadata.name !== '@earendil-works/pi-coding-agent')
     throw new Error('SDK_HOST_VERSION_UNSUPPORTED');
+  const match =
+    typeof metadata.version === 'string' && metadata.version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) throw new Error('SDK_HOST_VERSION_UNSUPPORTED');
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  if (!(major === 1 && minor >= 3)) throw new Error('SDK_HOST_VERSION_UNSUPPORTED');
 }
 
 export function validateSdkApi(sdk) {
@@ -27,6 +33,7 @@ export function validateSdkApi(sdk) {
     'createAgentSessionFromServices',
     'createAgentSessionRuntime',
     'resolveCliModel',
+    'resolveModelScopeWithDiagnostics',
     'createCodemodeExtension',
     'createToolSearchExtension',
     'createMcpExtension',
@@ -57,7 +64,7 @@ export function validateSdkApi(sdk) {
 }
 
 /** Startup contract re-assessed against SDK 1.3.0; original audit:
- * SDK 0.99.1 main.js:353–434,565–694. Exact versions only.
+ * SDK 0.99.1 main.js:353–434,565–694. Supported stable range: >=1.3.0 <2.0.0.
  * Metadata/admin/interactive startup modes are rejected, never ignored.
  * Trust asks have no CLI UI here: unresolved project trust stays denied.
  */
@@ -152,7 +159,8 @@ export function createStartupAdapter(sdk, internals) {
       });
       const patterns = parsed.models ?? settingsManager.getEnabledModels();
       const scopedModels = patterns?.length
-        ? resolveModelScopeFromModels(patterns, modelRuntime.getAvailableSnapshot()).scopedModels
+        ? (await resolveModelScopeFromModels(patterns, modelRuntime.getAvailableSnapshot()))
+            .scopedModels
         : [];
       const options = {
         scopedModels,

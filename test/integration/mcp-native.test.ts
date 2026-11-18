@@ -114,7 +114,7 @@ for (const mode of ['shared', 'dedicated'] as const) {
       `native MCP ${mode}: ${configured ? 'connected, disabled, failed and invalid' : 'empty'} status is correlated and never enters model history`,
       { timeout: 30000 },
       async () => {
-        assert.equal((await resolveNativeCli()).version, '1.2.0');
+        assert.match((await resolveNativeCli()).version, /^1\./);
         const fixture = await createNativeFixture(configured ? 'mcp-status' : 'mcp-status-empty');
         let spawned: SpawnedRpc | undefined;
         try {

@@ -47,7 +47,7 @@ test('RPC discovery is capability gated and ordinary model reads never request n
   };
   await client.getAvailableModels();
   assert.deepEqual(calls.splice(0), [['get_available_models', {}]]);
-  for (const version of ['1.2.0', '1.3.0']) {
+  for (const version of ['1.3.0', '1.3.1', '1.4.0', '1.5.2', '1.99.0']) {
     caps = { protocol: 1, sdkVersion: version, modelDiscovery: true };
     await client.getAvailableModels(true);
     assert.deepEqual(calls.splice(0), [
@@ -55,7 +55,7 @@ test('RPC discovery is capability gated and ordinary model reads never request n
       ['get_available_models', { refreshOpenRouter: true }],
     ]);
   }
-  for (const version of ['1.1.0', '1.2.1', '1.3.1', '1.4.0', undefined]) {
+  for (const version of ['1.1.0', '1.2.1', '2.0.0', '1.5.2-next', undefined]) {
     caps = { protocol: 1, sdkVersion: version, modelDiscovery: true };
     await client.getAvailableModels(true);
     assert.deepEqual(calls.splice(0), [

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { PassThrough, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
@@ -38,6 +39,7 @@ interface LoggerLike {
 // Electron's Node lacks module.enableCompileCache, so boots stayed 13s+).
 // A separate process schedules independently, and system Node ≥22 gives us the
 // V8 compile cache that turns later boots into bytecode loads.
+const immutableEnvKeys = new WeakMap<NodeJS.ProcessEnv, string>();
 let cachedNodeBin: string | null | undefined;
 function findSystemNode(): string | undefined {
   if (cachedNodeBin !== undefined) {
@@ -88,14 +90,30 @@ class HostWorkerConn {
     private readonly onDead: (conn: HostWorkerConn) => void,
     private readonly launchCwd?: string,
     private readonly reusable = true
-  ) {}
+  ) {
+    this.envKey = HostWorkerConn.computeEnvKey(baseEnv);
+  }
 
-  public matchesEnvironment(env: NodeJS.ProcessEnv, cwd?: string): boolean {
-    return (
-      this.reusable &&
-      this.launchCwd === cwd &&
-      JSON.stringify(this.baseEnv) === JSON.stringify(env)
-    );
+  /** Stable environment hash, computed once at construction; never log raw values. */
+  private readonly envKey: string;
+
+  public static computeEnvKey(env: NodeJS.ProcessEnv): string {
+    const cached = immutableEnvKeys.get(env);
+    if (cached) return cached;
+    // Extensions and providers can consume arbitrary variables, including credentials.
+    const entries = Object.keys(env)
+      .sort()
+      .filter((key) => env[key] !== undefined)
+      .map((key) => [key, env[key]]);
+    const key = createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+    // Launch plans freeze their captured environments. Mutable caller environments
+    // must be rehashed so an in-place credential/settings change cannot reuse a worker.
+    if (Object.isFrozen(env)) immutableEnvKeys.set(env, key);
+    return key;
+  }
+
+  public matchesEnvironmentKey(envKey: string, cwd?: string): boolean {
+    return this.reusable && this.launchCwd === cwd && this.envKey === envKey;
   }
 
   public get sessionCount(): number {
@@ -272,7 +290,10 @@ export class SharedPiHost {
   private piRootPromise: Promise<string> | undefined;
   private readonly maxWorkers: number;
   // Prewarmed draft sessions parked per cwd: "New Chat" adopts one instantly.
-  private readonly parked = new Map<string, { handle: PiProcessHandle; conn: HostWorkerConn }>();
+  private readonly parked = new Map<
+    string,
+    { handle: PiProcessHandle; conn: HostWorkerConn; info: SdkSessionOpen }
+  >();
   private prewarmTimer: ReturnType<typeof setTimeout> | undefined;
 
   public constructor(
@@ -310,6 +331,7 @@ export class SharedPiHost {
       return this.spawnConn(root, info.env ?? this.baseEnv, info.cwd, false);
     }
     const env = info?.env ?? this.baseEnv;
+    const envKey = HostWorkerConn.computeEnvKey(env);
     if (!info?.sdkRoot) {
       this.piRootPromise ??= this.resolvePiRoot().catch((error: unknown) => {
         this.piRootPromise = undefined;
@@ -318,7 +340,8 @@ export class SharedPiHost {
     }
     const piRoot = info?.sdkRoot ?? (await this.piRootPromise!);
     const live = this.conns.filter(
-      (conn) => !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironment(env, info?.cwd)
+      (conn) =>
+        !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironmentKey(envKey, info?.cwd)
     );
     // NEVER boot a second worker while one is still cold: parallel cold boots
     // contend on CPU (both importing Pi's whole module graph) and can push past
@@ -402,11 +425,13 @@ export class SharedPiHost {
         }
         const piRoot = launch?.sdkRoot ?? (await this.piRootPromise!);
         const env = launch?.env ?? this.baseEnv;
+        const envKey = HostWorkerConn.computeEnvKey(env);
         const cwd = launch?.cwd;
         let firstWarm = false;
         for (;;) {
           const live = this.conns.filter(
-            (conn) => !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironment(env, cwd)
+            (conn) =>
+              !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironmentKey(envKey, cwd)
           );
           const cold = live.find((conn) => !conn.warm);
           if (cold) {
@@ -454,12 +479,19 @@ export class SharedPiHost {
       return;
     }
     try {
-      const opened = await this.openSessionRaw({ cwd });
+      // Prewarm with the SAME launch plan the warmup used, so the parked session
+      // matches the first supervisor request for this cwd.
+      const prewarmInfo: SdkSessionOpen = {
+        cwd,
+        ...(this.warmupLaunch?.sdkRoot ? { sdkRoot: this.warmupLaunch.sdkRoot } : {}),
+        ...(this.warmupLaunch?.env ? { env: this.warmupLaunch.env } : {}),
+      };
+      const opened = await this.openSessionRaw(prewarmInfo);
       if (this.parked.has(cwd)) {
         await opened.handle.stop();
         return;
       }
-      this.parked.set(cwd, opened);
+      this.parked.set(cwd, { ...opened, info: prewarmInfo });
       this.logger.info(`Prewarmed a draft Pi session for ${cwd} (worker #${opened.conn.id})`);
     } catch (error) {
       this.logger.warn(
@@ -478,9 +510,22 @@ export class SharedPiHost {
     openTimeoutMs = 20_000,
     onOpening?: (handle: PiProcessHandle) => void
   ): Promise<PiProcessHandle> {
-    if (!info.sessionFile && !info.args && !info.env && !info.dedicated && !info.sdkRoot) {
+    // Adopt a prewarmed parked session when the request is a default New Chat
+    // (no existing session file, not dedicated) and the parked session's
+    // sdkRoot + env match (the keys that affect runtime behaviour).
+    if (!info.sessionFile && !info.dedicated) {
       const parked = this.parked.get(info.cwd);
-      if (parked && !parked.conn.fault) {
+      if (
+        parked &&
+        !parked.conn.fault &&
+        JSON.stringify(info.args ?? ['--mode', 'rpc', '--no-approve']) ===
+          JSON.stringify(parked.info.args ?? ['--mode', 'rpc', '--no-approve']) &&
+        parked.conn.piRoot === (info.sdkRoot ?? (await this.resolvePiRoot())) &&
+        parked.conn.matchesEnvironmentKey(
+          HostWorkerConn.computeEnvKey(info.env ?? this.baseEnv),
+          info.cwd
+        )
+      ) {
         this.parked.delete(info.cwd);
         this.schedulePrewarm(info.cwd);
         this.logger.info(`Adopted prewarmed Pi session for ${info.cwd}`);

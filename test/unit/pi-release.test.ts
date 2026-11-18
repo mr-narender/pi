@@ -129,20 +129,20 @@ test('Pi CI has one exact required aggregate covering every quality gate with pi
     'node scripts/inspect-vsix.mjs',
   ])
     assert.ok(commands.includes(command), command);
-  assert.ok(commands.includes('npm ci --prefix .github/pi-sdk'));
   assert.ok(commands.includes('npm ci --prefix .github/pi-sdk-13 --install-strategy=nested'));
+  assert.ok(commands.includes('npm ci --prefix .github/pi-sdk-15 --install-strategy=nested'));
   assert.ok(
-    commands.includes('"$GITHUB_WORKSPACE/.github/pi-sdk-13/node_modules/.bin" >> "$GITHUB_PATH"')
+    commands.includes('"$GITHUB_WORKSPACE/.github/pi-sdk-15/node_modules/.bin" >> "$GITHUB_PATH"')
   );
   assert.ok(
     !commands.includes('"$GITHUB_WORKSPACE/.github/pi-sdk/node_modules/.bin" >> "$GITHUB_PATH"'),
-    'selected PATH must exercise 1.3; backward tests select 1.2 explicitly'
+    'selected PATH must exercise 1.5; backward tests select older fixtures explicitly'
   );
   assert.equal(
-    JSON.parse(readFileSync('.github/pi-sdk/package.json', 'utf8')).dependencies[
+    JSON.parse(readFileSync('.github/pi-sdk-15/package.json', 'utf8')).dependencies[
       '@earendil-works/pi-coding-agent'
     ],
-    '1.2.0'
+    '1.5.2'
   );
   assert.equal(
     JSON.parse(readFileSync('.github/pi-sdk-13/package.json', 'utf8')).dependencies[
@@ -156,8 +156,8 @@ test('Pi CI has one exact required aggregate covering every quality gate with pi
   const setup = quality.steps.find((step: any) => step.uses?.startsWith('actions/setup-node@'));
   for (const lock of [
     'package-lock.json',
-    '.github/pi-sdk/package-lock.json',
     '.github/pi-sdk-13/package-lock.json',
+    '.github/pi-sdk-15/package-lock.json',
   ])
     assert.ok(setup.with['cache-dependency-path'].split('\n').includes(lock));
   for (const job of Object.values(workflow.jobs) as any[]) {

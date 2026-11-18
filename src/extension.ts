@@ -14,6 +14,7 @@ import {
   selectedSdkRoot,
   isSupportedPiSdkVersion,
   resolvePiLaunch,
+  invalidatePiLaunchCache,
   piLaunchEnvironment,
 } from './process/piLauncher';
 import { registerChatOps } from './commands/chatOps';
@@ -1418,6 +1419,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('piRpc')) invalidatePiLaunchCache();
       if (
         event.affectsConfiguration('piRpc.chatFontSize') ||
         event.affectsConfiguration('piRpc.chatFontFamily') ||

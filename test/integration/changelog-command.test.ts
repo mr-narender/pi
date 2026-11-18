@@ -15,11 +15,11 @@ import { createEmptyComposerState } from '../../src/webview/composer';
       await writeFile(join(root, 'dist/cli.js'), '// owned fixture');
       const pkg = {
         name: '@earendil-works/pi-coding-agent',
-        version: '0.99.1',
+        version: '1.5.2',
         bin: { pi: 'dist/cli.js' },
       };
       await writeFile(join(root, 'package.json'), JSON.stringify(pkg));
-      const content = '# Changelog\n\n## 0.99.1\n\nSELECTED ENGINE ONLY\n';
+      const content = '# Changelog\n\n## 1.5.2\n\nSELECTED ENGINE ONLY\n';
       await writeFile(join(root, 'CHANGELOG.md'), content);
       let choice: string | undefined = 'Open Preview';
       let mutate: (() => void) | undefined;
@@ -114,7 +114,7 @@ import { createEmptyComposerState } from '../../src/webview/composer';
       assert.equal(previews.length, 1, 'must open native selected-engine Markdown preview');
       assert.deepEqual(previews[0], ['markdown.showPreview', 'owned-document']);
       assert.equal(docs[0].language, 'markdown');
-      assert.match(docs[0].content, /Pi engine 0\.99\.1/);
+      assert.match(docs[0].content, /Pi engine 1\.5\.2/);
       assert.ok(docs[0].content.includes(content));
       assert.equal(state.draft, '');
       assert.equal(state.localCommandAck, 'ack');

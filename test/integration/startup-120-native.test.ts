@@ -22,10 +22,10 @@ async function until(predicate: () => boolean | Promise<boolean>) {
 
 for (const mode of ['shared', 'dedicated'] as const) {
   test(
-    `Pi 1.2.0 ${mode}: startup cancellation, queued input and custom runs`,
+    `supported Pi SDK ${mode}: startup cancellation, queued input and custom runs`,
     { timeout: 30000 },
     async () => {
-      assert.equal((await resolveNativeCli()).version, '1.2.0');
+      assert.match((await resolveNativeCli()).version, /^1\./);
       const fixture = await createNativeFixture('startup');
       let child: Awaited<ReturnType<typeof spawnNativeSdkHost>>['child'] | undefined;
       let transport: RpcTransport | undefined;

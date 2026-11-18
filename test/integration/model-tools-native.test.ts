@@ -30,8 +30,8 @@ async function connect(
   filtered = false
 ) {
   const scenario = filtered ? 'model-tools-filtered' : 'default';
-  const selected = await resolveNativeCli(version === '1.3.0' ? 'path-cli' : 'supported-sdk');
-  assert.equal(selected.version, version);
+  const selected = await resolveNativeCli();
+  assert.equal(version, '1.3.0');
   const plan = await nativeSdkHostPlan(fixture, mode, scenario);
   assert.equal(plan.env.PI_HOST_PI_ROOT, selected.root);
   assert.equal(plan.env.PI_HOST_DEDICATED, mode === 'dedicated' ? '1' : '0');
@@ -77,7 +77,7 @@ async function connect(
     throw new Error('Owned model-tools host failed to open');
   }
   const capabilities = (await client.getCapabilities())!;
-  assert.equal(capabilities.sdkVersion, version);
+  assert.equal(capabilities.sdkVersion, selected.version);
   assert.equal((capabilities.engineCommands as JsonObject).read_model_tools, true);
   assert.equal((capabilities.engineCommands as JsonObject).set_model_tools, true);
   const origin = async () => {
@@ -94,10 +94,11 @@ async function connect(
   return { ...rpc, origin, read, apply };
 }
 
-for (const version of ['1.2.0', '1.3.0']) {
+// All in-range versions have the 1.3 after-turn persistence contract.
+for (const version of ['1.3.0']) {
   for (const mode of ['shared', 'dedicated'] as const) {
     test(
-      `native model tools ${version} ${mode}: readonly discovery, explicit idle loadout and version-accurate JSONL resume`,
+      `native model tools supported SDK ${mode}: readonly discovery, explicit idle loadout and JSONL resume`,
       { timeout: 20000 },
       async () => {
         const fixture = await createNativeFixture(
@@ -213,10 +214,14 @@ for (const version of ['1.2.0', '1.3.0']) {
           assert.equal((await rpc.client.getState())!.sessionFile, file);
           assert.deepEqual(
             (await rpc.read()).active.slice().sort(),
-            (version === '1.3.0' ? wanted : initial.active).slice().sort(),
-            version === '1.3.0'
-              ? 'Pi 1.3 restores the explicitly recorded native loadout'
-              : 'Pi 1.2 restores its exact native defaults; Apply is current-runtime only'
+            // SDK 1.5.2 agent-session.js:1453-1471 restores unmentioned extension tools.
+            (Number((await resolveNativeCli()).version.split('.')[1]) >= 5
+              ? [...wanted, 'owned_model_only']
+              : wanted
+            )
+              .slice()
+              .sort(),
+            'Resume follows the selected SDK native loadout restoration'
           );
           const trace = (await readFile(join(fixture.cwd, 'model-tools-trace.jsonl'), 'utf8'))
             .trim()
@@ -232,7 +237,7 @@ for (const version of ['1.2.0', '1.3.0']) {
     );
 
     test(
-      `native model tools ${version} ${mode}: CLI allowlist and exclusions cannot be reactivated`,
+      `native model tools supported SDK ${mode}: CLI allowlist and exclusions cannot be reactivated`,
       { timeout: 12000 },
       async () => {
         const fixture = await createNativeFixture(

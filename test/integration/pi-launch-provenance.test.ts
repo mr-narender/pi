@@ -58,7 +58,7 @@ test('supervisor keeps probe and subprocess bound despite async PATH/settings dr
       join(root, 'package.json'),
       JSON.stringify({
         name: '@earendil-works/pi-coding-agent',
-        version: '0.99.1',
+        version: '1.5.2',
         bin: { pi: 'dist/cli.js' },
       }),
       { mode: 0o444 }

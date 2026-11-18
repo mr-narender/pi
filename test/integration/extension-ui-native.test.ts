@@ -28,8 +28,8 @@ async function connect(
   mode: 'shared' | 'dedicated',
   version: string
 ): Promise<SpawnedRpc> {
-  const selected = await resolveNativeCli(version === '1.3.0' ? 'path-cli' : 'supported-sdk');
-  assert.equal(selected.version, version);
+  const selected = await resolveNativeCli();
+  assert.equal(version, '1.3.0');
   const plan = await nativeSdkHostPlan(fixture, mode);
   assert.equal(plan.env.PI_HOST_PI_ROOT, selected.root);
   assert.equal(plan.env.PI_HOST_DEDICATED, mode === 'dedicated' ? '1' : '0');
@@ -75,7 +75,7 @@ async function connect(
     throw new Error('Owned extension UI host failed to open');
   }
   try {
-    assert.equal((await client.getCapabilities())!.sdkVersion, version);
+    assert.equal((await client.getCapabilities())!.sdkVersion, selected.version);
   } catch (error) {
     await shutdown(rpc);
     throw error;
@@ -83,10 +83,10 @@ async function connect(
   return rpc;
 }
 
-for (const version of ['1.2.0', '1.3.0']) {
+for (const version of ['1.3.0']) {
   for (const mode of ['shared', 'dedicated'] as const) {
     test(
-      `native extension UI ${version} ${mode}: cancel, timeout, synchronous getter limits and terminal-only custom UI`,
+      `native extension UI supported SDK ${mode}: cancel, timeout, synchronous getter limits and terminal-only custom UI`,
       { timeout: 20000 },
       async () => {
         const fixture = await createNativeFixture(
@@ -314,7 +314,7 @@ test(
     let emitted = 0;
     try {
       const selected = await resolveNativeCli('path-cli');
-      assert.equal(selected.version, '1.3.0');
+      assert.match(selected.version, /^1\./);
       const plan = await nativeSdkHostPlan(fixture, 'shared');
       assert.equal(plan.env.PI_HOST_PI_ROOT, selected.root);
       const host = await spawnNativeSdkHost(fixture, 'shared');

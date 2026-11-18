@@ -153,6 +153,11 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     if (!launch.usingBundled) {
       await this.assertVersion(launch);
     }
+    if (!launch.sdkRoot) {
+      this.logger.info(
+        'Selected executable has no compatible SDK root (>=1.3.0 <2.0.0); using stock pi --mode rpc fallback.'
+      );
+    }
     const useShell = launch.usingBundled ? false : SPAWN_WITH_SHELL;
     this.logger.info(
       `Starting Pi for ${this.folder.name} (generation=${this.generation}) via ${launch.label} ` +

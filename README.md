@@ -92,6 +92,9 @@ shared Pi runtime pool     configurable workers host sessions (per-session exten
                            a draft session is prewarmed so New Chat opens instantly
 ```
 
+- A [thin SDK host](docs/thin-sdk-host.md) uses Pi's public session/runtime APIs
+  for stable SDKs **>=1.3.0 <2.0.0** (tested: 1.3.0 and 1.5.2). Managed installs
+  target 1.5.2; custom wrappers and out-of-range versions keep stock RPC fallback.
 - The first chat boots the shared runtime; every further chat attaches in the background
   while the tab paints immediately (animated loader, then the composer goes live).
 - Sessions are named **Session N** by default and can be renamed; the real session id

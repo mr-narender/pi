@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createNativeFixture, nativeSdkHostPlan, resolveNativeCli } from '../helpers/nativeFixture';
-import { isSupportedPiSdkVersion, SUPPORTED_PI_SDK_VERSIONS } from '../../src/process/piLauncher';
+import { isSupportedPiSdkVersion, PI_SDK_RANGE } from '../../src/process/piLauncher';
 
 const browserBundle = build({
   entryPoints: ['src/webview/media/chat.ts'],
@@ -27,7 +27,10 @@ for (const outcome of ['answer', 'cancel', 'stop'] as const) {
         if (!cleaned) await fixture.dispose();
       });
       const selected = await resolveNativeCli('path-cli');
-      assert.equal(selected.version, '1.3.0');
+      assert.ok(
+        isSupportedPiSdkVersion(selected.version),
+        `path-cli version ${selected.version} must be in supported SDK range`
+      );
       const plan = await nativeSdkHostPlan(fixture, 'shared');
       const env = {
         ...plan.env,
@@ -56,7 +59,7 @@ for (const outcome of ['answer', 'cancel', 'stop'] as const) {
             setup(builder) {
               builder.onLoad({ filter: /piLauncher\.ts$/ }, () => ({
                 contents:
-                  "export { piLaunchEnvironment, resolvePiLaunch, isSupportedPiSdkVersion, SUPPORTED_PI_SDK_VERSIONS } from 'owned-startup-plan';",
+                  "export { piLaunchEnvironment, resolvePiLaunch, isSupportedPiSdkVersion, PI_SDK_RANGE } from 'owned-startup-plan';",
                 loader: 'ts',
               }));
             },
@@ -79,7 +82,7 @@ for (const outcome of ['answer', 'cancel', 'stop'] as const) {
             : name === 'owned-startup-plan'
               ? {
                   isSupportedPiSdkVersion,
-                  SUPPORTED_PI_SDK_VERSIONS,
+                  PI_SDK_RANGE,
                   piLaunchEnvironment: () => env,
                   resolvePiLaunch: () => ({
                     command: plan.command,

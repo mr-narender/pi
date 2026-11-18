@@ -10,23 +10,32 @@ export interface PathPiInfo {
   version?: string;
 }
 
-// Exact audited contracts only: never admit a new minor/major by semver range.
-export const TESTED_PI_VERSION = { major: 1, minor: 3 };
-export const SUPPORTED_PI_SDK_VERSIONS = [
-  '0.99.1',
-  '0.99.2',
-  '1.0.0',
-  '1.0.4',
-  '1.1.0',
-  '1.2.0',
-  '1.3.0',
-] as const;
+// Semver-range gate: the thin SDK host depends on stable public API surface
+// (createAgentSessionServices, AgentSession, AgentSessionRuntime, etc.).
+// Verified against installed fixtures: .github/pi-sdk-13 (1.3.0) and
+// .github/pi-sdk-15 (1.5.2). The range admits any future 1.x patch/minor that
+// preserves the same exports without requiring a new extension release.
+export const PI_SDK_RANGE = { minMajor: 1, minMinor: 3, maxExclusiveMajor: 2 } as const;
+/** Specific version targeted by managed auto-install. */
+export const MANAGED_PI_TARGET = '1.5.2';
+export const TESTED_PI_VERSION = { major: 1, minor: 5 };
+
+/** Check whether a version string falls in the supported SDK range (>=1.3.0 <2.0.0).
+ *  Pre-release versions (e.g. 1.3.0-next) are rejected — only stable releases are admitted. */
 export function isSupportedPiSdkVersion(version: unknown): version is string {
-  return SUPPORTED_PI_SDK_VERSIONS.includes(version as (typeof SUPPORTED_PI_SDK_VERSIONS)[number]);
+  if (typeof version !== 'string') return false;
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) return false;
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  return (
+    major >= PI_SDK_RANGE.minMajor &&
+    major < PI_SDK_RANGE.maxExclusiveMajor &&
+    (major > PI_SDK_RANGE.minMajor || minor >= PI_SDK_RANGE.minMinor)
+  );
 }
 let compatLogged = false;
 
-/** PATH pi's package root, gated on host-fork compatibility. */
+/** PATH pi's package root, gated on SDK semver range compatibility. */
 export function usablePathPiRoot(logger?: {
   warn(message: string): void;
   info(message: string): void;
@@ -39,7 +48,7 @@ export function usablePathPiRoot(logger?: {
   if (!root && !compatLogged) {
     compatLogged = true;
     logger?.warn(
-      `PATH pi v${info.version} has no audited canonical SDK contract; using stock RPC only.`
+      `PATH pi v${info.version} is outside the supported SDK range (>=1.3.0 <2.0.0); using stock RPC subprocess only.`
     );
   }
   return root;
@@ -134,8 +143,10 @@ let managedCliPath: string | undefined;
 
 export function setBundledPiCliPath(path: string | undefined): void {
   bundledCliPath = path;
+  invalidatePiLaunchCache();
 }
 export function setManagedPiCliPath(path: string | undefined): void {
+  invalidatePiLaunchCache();
   managedCliPath = path && verifiedSdkRoot(path) ? path : undefined;
 }
 export function bundledPiAvailable(): boolean {
@@ -211,6 +222,13 @@ export function piLaunchEnvironment(
   };
 }
 
+// Cache filesystem discovery only, never the captured environment or launch plan.
+// A short TTL detects CLI replacements outside extension-controlled installs.
+const launchDiscovery = new Map<string, { expires: number; command: string; sdkRoot?: string }>();
+export function invalidatePiLaunchCache(): void {
+  launchDiscovery.clear();
+}
+
 /** Resolve one authoritative runtime: explicit executable, current PATH, then
  * the selected managed/dev fallback when neither external source exists. */
 export function resolvePiLaunch(
@@ -219,7 +237,19 @@ export function resolvePiLaunch(
   cwd = process.cwd()
 ): PiLaunchPlan {
   const configuredExecutable = settings.executable !== 'pi';
-  const pathExecutable = resolveExecutable(settings.executable, env, cwd);
+  const discoveryKey = JSON.stringify([
+    settings.executable,
+    settings.piSource,
+    env.PATH,
+    env.Path,
+    env.PATHEXT,
+    cwd,
+    bundledCliPath,
+    managedCliPath,
+  ]);
+  const cached = launchDiscovery.get(discoveryKey);
+  const discovery = cached && cached.expires > Date.now() ? cached : undefined;
+  const pathExecutable = discovery?.command ?? resolveExecutable(settings.executable, env, cwd);
   const existingPathPi = (() => {
     try {
       accessSync(pathExecutable, process.platform === 'win32' ? constants.F_OK : constants.X_OK);
@@ -239,6 +269,15 @@ export function resolvePiLaunch(
   const command = choice.usingBundled
     ? choice.command
     : resolveExecutable(choice.command, launchEnv, launchCwd);
+  const sdkRoot = discovery?.sdkRoot ?? verifiedSdkRoot(cliPath ?? prefixArgs[0] ?? command);
+  if (!discovery) {
+    if (launchDiscovery.size >= 32) launchDiscovery.clear();
+    launchDiscovery.set(discoveryKey, {
+      expires: Date.now() + 1000,
+      command: pathExecutable,
+      sdkRoot,
+    });
+  }
   return Object.freeze({
     ...choice,
     command,
@@ -247,7 +286,7 @@ export function resolvePiLaunch(
     extraEnv: Object.freeze({ ...choice.extraEnv }),
     env: launchEnv,
     cwd: launchCwd,
-    sdkRoot: verifiedSdkRoot(cliPath ?? prefixArgs[0] ?? command),
+    sdkRoot,
   });
 }
 

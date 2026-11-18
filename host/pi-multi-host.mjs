@@ -1,22 +1,19 @@
 /**
- * RPC mode: Headless operation with JSON stdin/stdout protocol.
+ * Thin multi-session SDK host (Architecture D).
  *
- * Used for embedding the agent in other applications.
- * Receives commands as JSON on stdin, outputs events and responses as JSON on stdout.
+ * Hosts MULTIPLE Pi sessions in ONE process on a SHARED ModelRuntime using only
+ * the public @earendil-works/pi-coding-agent SDK surface. The multiplexed JSONL
+ * {k, d} envelope protocol on stdio is unchanged from the previous forked host
+ * so the extension-side sharedPiHost/RpcTransport layer is unaffected.
  *
- * Protocol:
- * - Commands: JSON objects with `type` field, optional `id` for correlation
- * - Responses: JSON objects with `type: "response"`, `command`, `success`, and optional `data`/`error`
- * - Events: AgentSessionEvent objects streamed as they occur
- * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
+ * SDK imports use the package entry point except the optional llama.cpp builtin
+ * (isolated in llama-builtin.mjs) and pi-ai dynamic thinking-level maps.
+ * Command dispatch still mirrors the CLI RPC adapter; this is not a new protocol.
  */
-// FORK of vendor/pi/dist/modes/rpc/rpc-mode.js, adapted to host MULTIPLE Pi
-// sessions in ONE process on a SHARED ModelRuntime. The per-session command
-// logic (handleCommand, dialogs, extension UI) is preserved verbatim; only the
-// I/O layer changes: global stdin/stdout -> per-session {k, d} envelopes so N
-// sessions multiplex over one stdio pair. Re-sync this file when bumping Pi.
+import { loadLlamaBuiltin } from './llama-builtin.mjs';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { createImportCommands } from './import-commands.mjs';
 import { createAuthCommands } from './auth-commands.mjs';
 import { nativeMcpCommand, readNativeMcpStatus } from './mcp-status.mjs';
@@ -50,26 +47,21 @@ const PI_ROOT =
   fileURLToPath(new URL('../vendor/pi', import.meta.url));
 const metadata = JSON.parse(readFileSync(path.join(PI_ROOT, 'package.json'), 'utf8'));
 validateSdkMetadata(metadata);
-const supportsModelDiscovery = ['1.2.0', '1.3.0'].includes(metadata.version);
-const modelToolsPersistence =
-  metadata.version === '1.3.0'
-    ? 'after-turn'
-    : metadata.version === '1.2.0'
-      ? 'runtime-only'
-      : undefined;
+// All supported versions (>=1.3.0) have model discovery and after-turn persistence.
+const supportsModelDiscovery = true;
+const modelToolsPersistence = 'after-turn';
 const piImport = (rel) => import(pathToFileURL(path.join(PI_ROOT, rel)).href);
 const sdk = await piImport('dist/index.js');
 validateSdkApi(sdk);
-const { resolveModelScopeFromModels } = await piImport('dist/core/model-resolver.js');
-// Use the selected SDK's native dynamic thinking maps, not a GUI approximation.
+// --- Documented internal SDK imports (no public factory available) ---
+// Resolve against the captured catalog, without refreshing credentials/network.
+const resolveModelScopeFromModels = (patterns, models) =>
+  sdk.resolveModelScopeWithDiagnostics(patterns, { getAvailable: async () => models });
 const thinking = await import(
   pathToFileURL(resolveSdkDependencyFile(PI_ROOT, '@earendil-works/pi-ai/dist/models.js')).href
 );
-const { builtInExtensions: nativeBuiltins } = await piImport('dist/extensions/index.js');
-// The public factories supply the CLI's builtin wrappers; llama.cpp has no public
-// factory in 0.99.1, so retain that single audited native builtin entry.
 const builtInExtensions = [
-  nativeBuiltins[0],
+  ...(await loadLlamaBuiltin(PI_ROOT, metadata.version)),
   { name: 'codemode', factory: sdk.createCodemodeExtension(), replaceable: true, builtin: true },
   {
     name: 'tool-search',
@@ -79,6 +71,7 @@ const builtInExtensions = [
   },
   { name: 'mcp', factory: sdk.createMcpExtension(), replaceable: true, builtin: true },
 ];
+// --- End internal imports ---
 const buildRuntimeHost = createStartupAdapter(sdk, {
   resolveModelScopeFromModels,
   builtInExtensions,
@@ -86,12 +79,108 @@ const buildRuntimeHost = createStartupAdapter(sdk, {
   hasTrustRequiringProjectResources: sdk.hasTrustRequiringProjectResources,
 });
 
-const { flushRawStdout, takeOverStdout, waitForRawStdoutBackpressure, writeRawStdout } =
-  await piImport('dist/core/output-guard.js');
-const { killTrackedDetachedChildren } = await piImport('dist/utils/shell.js');
-const { theme, initTheme } = await piImport('dist/modes/interactive/theme/theme.js');
-const { toJsonEvent } = await piImport('dist/modes/json-event.js');
-const { attachJsonlLineReader, serializeJsonLine } = await piImport('dist/modes/rpc/jsonl.js');
+// ── Lightweight replacements for internal SDK utilities ─────────────────
+// These replace imports from dist/core/output-guard.js, dist/utils/shell.js,
+// dist/modes/json-event.js, and dist/modes/rpc/jsonl.js. Command dispatch and UI
+// bridging below still mirror much of rpc-mode.js and require behavioural tests.
+
+// stdout write queue (replaces output-guard.js)
+const rawStdoutWrite = process.stdout.write.bind(process.stdout);
+// Redirect console.log (used by SDK internals) to stderr so it doesn't corrupt JSONL
+process.stdout.write = function (...args) {
+  return process.stderr.write.apply(process.stderr, args);
+};
+let writeTail = Promise.resolve();
+function writeRawStdout(text) {
+  if (!text) return;
+  writeTail = writeTail.then(
+    () =>
+      new Promise((resolve, reject) => {
+        rawStdoutWrite(text, (err) => (err ? reject(err) : resolve()));
+      })
+  );
+  writeTail.catch(() => process.exit(1));
+}
+async function waitForRawStdoutBackpressure() {
+  let tail;
+  do {
+    tail = writeTail;
+    await tail;
+  } while (tail !== writeTail);
+}
+async function flushRawStdout() {
+  await waitForRawStdoutBackpressure();
+}
+
+// JSONL helpers (replaces dist/modes/rpc/jsonl.js)
+function serializeJsonLine(value) {
+  return JSON.stringify(value) + '\n';
+}
+function attachJsonlLineReader(stream, onLine) {
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  const emit = (line) => onLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+  const onData = (chunk) => {
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    let idx;
+    while ((idx = buffer.indexOf('\n')) !== -1) {
+      emit(buffer.slice(0, idx));
+      buffer = buffer.slice(idx + 1);
+    }
+  };
+  const onEnd = () => {
+    buffer += decoder.end();
+    if (buffer) {
+      emit(buffer);
+      buffer = '';
+    }
+  };
+  stream.on('data', onData);
+  stream.on('end', onEnd);
+  return () => {
+    stream.off('data', onData);
+    stream.off('end', onEnd);
+  };
+}
+
+// Event serialization (replaces dist/modes/json-event.js toJsonEvent)
+function toJsonAssistantMessageEvent(event) {
+  if (event.type === 'toolcall_start') {
+    const toolCall = event.partial?.content?.[event.contentIndex];
+    const { partial: _p, ...delta } = event;
+    return toolCall?.type === 'toolCall'
+      ? { ...delta, id: toolCall.id, toolName: toolCall.name }
+      : delta;
+  }
+  if (!('partial' in event)) return event;
+  const { partial: _p, ...delta } = event;
+  return delta;
+}
+function toJsonEvent(event) {
+  if (event.type !== 'message_update') return event;
+  return {
+    type: 'message_update',
+    usage: event.message?.usage,
+    assistantMessageEvent: toJsonAssistantMessageEvent(event.assistantMessageEvent),
+  };
+}
+
+// Theme: use the public initTheme; access via globalThis symbol
+const THEME_KEY = Symbol.for('@earendil-works/pi-coding-agent:theme');
+try {
+  sdk.initTheme(undefined, false);
+} catch {
+  /* falls back to dark */
+}
+const theme = new Proxy(
+  {},
+  {
+    get(_, prop) {
+      const t = globalThis[THEME_KEY];
+      return t ? t[prop] : undefined;
+    },
+  }
+);
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -534,7 +623,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     }
     for (const signal of signals) {
       const handler = () => {
-        killTrackedDetachedChildren();
+        // session dispose handles child-process cleanup via the SDK
         void shutdown(signal === 'SIGHUP' ? 129 : 143, signal);
       };
       process.on(signal, handler);
@@ -904,7 +993,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
         }
       }
       case 'get_scoped_models':
-        return success(id, command.type, scopes.read());
+        return success(id, command.type, await scopes.read());
       case 'set_scoped_models':
         return success(id, command.type, await scopes.set(command));
       case 'save_scoped_models_default': {
@@ -1457,14 +1546,10 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
 //   inbound  rpc : the usual RPC command objects (routed to session k)
 //   outbound     : {k, d:<rpc response|event>} demuxed by the extension
 // ===========================================================================
-// Initialize the theme once (RPC mode, no watcher). Some MCP/extension paths
-// read the global theme; without this they warn "Theme not initialized".
-try {
-  initTheme(undefined, false);
-} catch {
-  /* invalid theme falls back to dark internally */
-}
-takeOverStdout();
+// Theme is initialized at import time above (sdk.initTheme). stdout is
+// redirected to stderr above so JSONL on fd 1 is never corrupted by SDK
+// console.log calls.
+// ===========================================================================
 const hostEmit = (k, obj) => {
   writeRawStdout(serializeJsonLine({ k, d: obj }));
 };
@@ -1589,7 +1674,7 @@ async function shutdownHost(code) {
 process.stdin.on('end', () => void shutdownHost(0));
 for (const sig of process.platform === 'win32' ? ['SIGTERM'] : ['SIGTERM', 'SIGHUP']) {
   process.on(sig, () => {
-    killTrackedDetachedChildren();
+    // session dispose handles child-process cleanup via the SDK
     void shutdownHost(sig === 'SIGHUP' ? 129 : 143);
   });
 }

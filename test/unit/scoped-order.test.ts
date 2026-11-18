@@ -77,7 +77,7 @@ for (const mutation of ['cycle_model', 'set_model', 'new_session'])
       if (mutation === 'new_session') f.session.sessionId = 'in-memory-two';
       else f.session.model = f.models[1];
     });
-    const before = f.ops.read();
+    const before = await f.ops.read();
     const save = dispatch({
       type: 'save_scoped_models_default',
       expectedRevision: before.revision,
@@ -103,8 +103,8 @@ for (const source of ['model', 'thinking', 'session', 'catalog'])
   test(`scope save revalidates out-of-band ${source}, with explicit persisted-default outcome`, async () => {
     const { createScopeOperations } = await backend();
     const f = setup(createScopeOperations);
-    const before = f.ops.read();
-    assert.equal(f.ops.read().revision, before.revision);
+    const before = await f.ops.read();
+    assert.equal((await f.ops.read()).revision, before.revision);
     const save = f.ops.save({
       expectedRevision: before.revision,
       refs: [{ provider: 'a', id: 'two' }],
@@ -114,7 +114,7 @@ for (const source of ['model', 'thinking', 'session', 'catalog'])
     if (source === 'thinking') f.session.thinkingLevel = 'high';
     if (source === 'session') f.session.sessionId = 'in-memory-two';
     if (source === 'catalog') f.models.push({ provider: 'b', id: 'new' });
-    assert.notEqual(f.ops.read().revision, before.revision);
+    assert.notEqual((await f.ops.read()).revision, before.revision);
     f.release();
     await assert.rejects(save, /^Error: SCOPES_DEFAULT_SAVED_SESSION_NOT_APPLIED$/);
     assert.deepEqual(f.session.scopedModels, []);
