@@ -250,6 +250,7 @@ test('closing a tab tears down its controller even when paused storage write fai
   const host = { resource: f.resource };
   Object.assign(f.manager, {
     keyFor: () => 'controller-key',
+    pendingVisibleFlush: new Set(),
     setUnseenCompletion() {},
     sessions: { unbind() {} },
     cache: { markClosed: async () => {} },

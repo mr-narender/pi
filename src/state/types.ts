@@ -36,6 +36,8 @@ export interface ToolRunState {
   endedAt?: number;
   /** Native Pi tool execution time; never derived from UI timestamps. */
   durationMs?: number;
+  /** Parent tool call ID for nested/subagent tool calls (delegate_tasks children). */
+  parentToolCallId?: string;
 }
 
 export interface WidgetState {
@@ -226,7 +228,15 @@ export interface WebviewPendingImageItem {
   requiresReselect?: boolean;
 }
 
+export interface WebviewAgentChildTool {
+  id: string;
+  name: string;
+  status: 'running' | 'completed' | 'error';
+  durationMs?: number;
+}
+
 export interface WebviewActivity {
+  delegatedTools?: Array<{ toolCallId: string; label: string; tools: WebviewAgentChildTool[] }>;
   agents?: Array<{
     id: string;
     toolCallId: string;
@@ -249,6 +259,8 @@ export interface WebviewActivity {
     name: string;
     status: 'running' | 'completed' | 'error';
     durationMs?: number;
+    /** Present when this tool call is a child of a delegate_tasks call. */
+    parentToolCallId?: string;
   }>;
   output: string;
   files: Array<{ path: string }>;
@@ -349,8 +361,17 @@ export interface WebviewSnapshot {
   preview?: SendPreviewState;
   acceptedSendSnapshot?: AcceptedSendSnapshot;
   recovery?: RecoveryState;
+  /** Interrupted turn detected after reconcile — user can click to resend. */
+  interruptedTurn?: {
+    lastUserMessage?: string;
+    canResend?: boolean;
+    kind: 'noReply' | 'incompleteReply';
+  };
   isTrusted: boolean;
   folders: Array<{ name: string; uri: string; active: boolean }>;
+  // Display mode toggles (webview-persisted via postMessage, extension-side via workspaceState).
+  showToolDetails?: boolean;
+  showThinking?: boolean;
   // Presentation settings (from config).
   workingAnimation?: string;
   chatFontFamily?: string;

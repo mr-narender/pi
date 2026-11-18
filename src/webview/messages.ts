@@ -27,6 +27,9 @@ export type WebviewInboundMessage =
       text?: string;
     }
   | { type: 'toggleFollow' }
+  | { type: 'toggleToolDetails' }
+  | { type: 'toggleThinking' }
+  | { type: 'restoreInterruptedPrompt' }
   | { type: 'screenOpenFile'; path: string; needle?: string }
   | { type: 'screenRevert'; callId: string }
   | { type: 'setDraft'; text: string; resetSeq?: number }
@@ -166,6 +169,9 @@ export function parseWebviewMessage(value: unknown): WebviewInboundMessage | und
     case 'copyAcceptedSnapshot':
     case 'sendAcceptedSnapshotAgain':
     case 'toggleFollow':
+    case 'toggleToolDetails':
+    case 'toggleThinking':
+    case 'restoreInterruptedPrompt':
     case 'abort':
     case 'checkMcpStatus':
     case 'pickImages':

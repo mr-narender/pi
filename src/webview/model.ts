@@ -681,6 +681,11 @@ export function createWebviewSnapshot(
     preview: extra.composer.preview,
     acceptedSendSnapshot: extra.composer.acceptedSendSnapshot,
     recovery: extra.composer.recovery,
+    interruptedTurn: detectInterruptedTurn(
+      state.messages,
+      state.connectionState,
+      state.state.isStreaming === true
+    ),
     isTrusted: extra.isTrusted,
     folders: extra.folders,
     workingAnimation: extra.presentation?.workingAnimation,
@@ -691,6 +696,84 @@ export function createWebviewSnapshot(
         : undefined,
     typewriterSpeed: extra.presentation?.typewriterSpeed,
   };
+}
+
+/**
+ * Detect an interrupted turn after reconcile: the last message is a user prompt
+ * with no assistant reply, or the turn ends before a final assistant answer.
+ * Exported for unit tests.
+ */
+export function detectInterruptedTurn(
+  messages: readonly JsonObject[],
+  connectionState: ControllerState['connectionState'],
+  isStreaming: boolean
+): WebviewSnapshot['interruptedTurn'] {
+  // Only detect when idle (not actively streaming or connecting).
+  if (isStreaming || connectionState !== 'ready') return undefined;
+  const userText = (message: JsonObject): string | undefined => {
+    if (typeof message.content === 'string') {
+      return (
+        (parseCapturedContextEnvelope(message.content, '')?.displayText ?? message.content) ||
+        undefined
+      );
+    }
+    if (!Array.isArray(message.content)) return undefined;
+    return (
+      message.content
+        .flatMap((block) =>
+          block &&
+          typeof block === 'object' &&
+          !Array.isArray(block) &&
+          block.type === 'text' &&
+          typeof block.text === 'string'
+            ? [parseCapturedContextEnvelope(block.text, '')?.displayText ?? block.text]
+            : []
+        )
+        .join('\n') || undefined
+    );
+  };
+  if (messages.length === 0) return undefined;
+  const last = messages[messages.length - 1];
+  if (!last) return undefined;
+  // Case 1: last message is user → no assistant reply received.
+  const canResend = (message: JsonObject): boolean => {
+    if (Array.isArray(message.attachments) && message.attachments.length) return false;
+    if (typeof message.content === 'string') return !message.content.includes(CONTEXT_OPEN);
+    return (
+      Array.isArray(message.content) &&
+      message.content.every(
+        (block) =>
+          block &&
+          typeof block === 'object' &&
+          !Array.isArray(block) &&
+          block.type === 'text' &&
+          typeof block.text === 'string' &&
+          !block.text.includes(CONTEXT_OPEN)
+      )
+    );
+  };
+  if (last.role === 'user') {
+    return { lastUserMessage: userText(last), canResend: canResend(last), kind: 'noReply' };
+  }
+  // A turn also remains incomplete if reconcile ends at a tool call/result,
+  // before the assistant's final answer was persisted.
+  if (
+    (last.role === 'assistant' && (!last.stopReason || last.stopReason === 'toolUse')) ||
+    ['toolResult', 'tool_result', 'tool'].includes(String(last.role))
+  ) {
+    // Find the user message that triggered this turn.
+    for (let i = messages.length - 2; i >= 0; i--) {
+      if (messages[i]?.role === 'user') {
+        return {
+          lastUserMessage: userText(messages[i]!),
+          canResend: canResend(messages[i]!),
+          kind: 'incompleteReply',
+        };
+      }
+    }
+    return { kind: 'incompleteReply' };
+  }
+  return undefined;
 }
 
 /** Report each response's own checklist without inferring task execution. */

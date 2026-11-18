@@ -239,7 +239,8 @@ test('agent rows are folded native disclosures and have distinct identities acro
   f.update();
   const doc = new JSDOM(renderChatApp(f.snapshot())).window.document;
   const rows = [...doc.querySelectorAll<HTMLDetailsElement>('.reported-agent-details')];
-  assert.equal(rows.length, 1, 'one shared inspector, no duplicated agent output');
+  assert.equal(rows.length, 2, 'collapsed agent status under its parent call and in the inspector');
+  assert.ok(doc.querySelector('.tl-tool > .reported-agents .reported-agent-details'));
   assert.ok(rows.every((row) => !row.open && row.firstElementChild?.tagName === 'SUMMARY'));
   assert.equal(new Set(rows.map((row) => row.id)).size, rows.length);
 });

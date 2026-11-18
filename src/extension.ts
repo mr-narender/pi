@@ -970,6 +970,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       `π follow agent: ${next === 'open' ? 'open files + glow edits' : next === 'status' ? 'status bar only' : 'off'}`
     );
   });
+  // Display mode toggles matching Pi's TUI Ctrl+O / Ctrl+T semantics.
+  // Persisted per-window in workspaceState.
+  registrations.set('piRpc.toggleToolDetails', async () => {
+    const current = context.workspaceState.get<boolean>('piRpc.showToolDetails') ?? false;
+    await context.workspaceState.update('piRpc.showToolDetails', !current);
+    refreshViews();
+  });
+  registrations.set('piRpc.toggleThinking', async () => {
+    const current = context.workspaceState.get<boolean>('piRpc.showThinking') ?? false;
+    await context.workspaceState.update('piRpc.showThinking', !current);
+    refreshViews();
+  });
+  registrations.set('piRpc.toggleDetailMode', async () => {
+    const toolDetails = context.workspaceState.get<boolean>('piRpc.showToolDetails') ?? false;
+    const thinking = context.workspaceState.get<boolean>('piRpc.showThinking') ?? false;
+    const allOn = toolDetails && thinking;
+    await context.workspaceState.update('piRpc.showToolDetails', !allOn);
+    await context.workspaceState.update('piRpc.showThinking', !allOn);
+    refreshViews();
+  });
   // Model selection and thinking are independent controls. A successful model
   // change must not fail because an optional thinking capability is unavailable.
   registrations.set('piRpc.chatSettings', async () => {

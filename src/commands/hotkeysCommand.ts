@@ -10,6 +10,7 @@ export async function hotkeysCommand(args: string, valid: () => boolean): Promis
       modal: true,
       detail: [
         'VS Code command bindings: open Keyboard Shortcuts filtered to this extension. User overrides and when clauses are authoritative there; no effective bindings are inferred here.',
+        'Pi chat display: Cmd/Ctrl+Alt+O toggles tool output details (piRpc.toggleToolDetails); Cmd/Ctrl+Alt+T shows/hides thinking (piRpc.toggleThinking); Cmd/Ctrl+Alt+D toggles both (piRpc.toggleDetailMode). Tools/thinking default hidden; choices persist per workspace. Toolbar buttons and individual tool disclosures are also available.',
         'Composer-only behavior (not configurable VS Code keybindings):',
         'Shift+Tab: native thinking cycle (piRpc.cycleThinkingLevel), including while busy, on the current ready/busy chat. No repeat; Ctrl/Meta/Alt or IME Shift+Tab is left alone.',
         'Enter: activate the enabled send action (prompt when idle; queue a follow-up with Send next while busy). There is no dedicated composer steering/dequeue shortcut.',

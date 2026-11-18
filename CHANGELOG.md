@@ -8,6 +8,12 @@
 
 - With Pi ≥1.5, resumed chats re-enable registered extension tools absent from
   the recorded loadout (native Pi behaviour).
+- Add workspace-persisted tool-output and thinking display toggles (Cmd/Ctrl+Alt+O/T,
+  or both with Cmd/Ctrl+Alt+D), with visible chat toolbar controls. Group live
+  delegated tools by parent call without guessing individual agent attribution.
+- Coalesce hidden-chat streaming deltas until reveal while retaining state and
+  completion snapshots; cache unchanged code highlighting. Offer text-only prompt
+  restoration for interrupted turns and point paused outbox messages to Send.
 - Honor VS Code's On/Off/Auto motion setting in remote webviews; the OS preference
   no longer overrides an explicit Off and freezes the working indicator.
 - Measure Mermaid labels using their SVG font size under the webview's strict

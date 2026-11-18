@@ -20,7 +20,7 @@ import { ensureTrustedForMutation } from '../security/trust';
 import { SessionRegistry } from '../sessions/sessionRegistry';
 import type { SessionController } from '../sessions/sessionController';
 import type { DiagnosticsLogger } from '../diagnostics/logger';
-import { createWebviewSnapshot, firstPromptPreview } from '../webview/model';
+import { createWebviewSnapshot, detectInterruptedTurn, firstPromptPreview } from '../webview/model';
 import type { TurnReview } from '../review/turnReview';
 import { SessionIndex } from './sessionIndex';
 import { notifier } from '../ui/notifier';
@@ -325,6 +325,9 @@ export class ChatTabManager implements vscode.Disposable {
   // chats share a folder and folder-keyed busy tracking collides across them.
   private readonly lastRunOutcome = new WeakMap<SessionController, string | undefined>();
   private readonly busySince = new WeakMap<SessionController, number>();
+  // Only token/output deltas may be deferred while hidden, never state changes.
+  private readonly pendingVisibleFlush = new Set<string>();
+  private readonly lastObservedEvent = new WeakMap<SessionController, object>();
   private readonly unseenCompletions = new Set<string>();
   private turnReview: TurnReview | undefined;
 
@@ -465,6 +468,7 @@ export class ChatTabManager implements vscode.Disposable {
       for (const done of pending.resolvers) done();
     }
     this.pendingRender.clear();
+    this.pendingVisibleFlush.clear();
     this.lastRenderAt.clear();
     if (this.reapTimer) {
       clearInterval(this.reapTimer);
@@ -1106,6 +1110,7 @@ export class ChatTabManager implements vscode.Disposable {
     this.sessions.unbind(resourceKey);
     if (this.hosts.get(resourceKey) === host) {
       this.hosts.delete(resourceKey);
+      this.pendingVisibleFlush.delete(resourceKey);
       this.openChatsEmitter.fire();
     }
     await this.cache.markClosed(host.resource);
@@ -1145,6 +1150,12 @@ export class ChatTabManager implements vscode.Disposable {
     // out focus had moved to it).
     this.openChatsEmitter.fire();
     this.clearViewedCompletions();
+    // Flush a pending snapshot when a hidden tab becomes visible (Goal C).
+    if (host.panel.visible && this.pendingVisibleFlush.has(host.resource.toString())) {
+      this.pendingVisibleFlush.delete(host.resource.toString());
+      // Active tabs are rendered by activateResource below; don't double-post.
+      if (!active) await this.renderResource(host.resource);
+    }
     if (!active) {
       return;
     }
@@ -1219,6 +1230,12 @@ export class ChatTabManager implements vscode.Disposable {
         return this.handleScreenRevert(host, context, parsed.callId);
       case 'toggleFollow':
         return this.handleToggleFollow(host.resource);
+      case 'toggleToolDetails':
+        return this.handleToggleDisplayMode('piRpc.showToolDetails');
+      case 'toggleThinking':
+        return this.handleToggleDisplayMode('piRpc.showThinking');
+      case 'restoreInterruptedPrompt':
+        return this.handleRestoreInterruptedPrompt(host.resource, context);
       case 'abort':
         return this.handleAbort(host.resource);
       case 'checkMcpStatus':
@@ -1489,6 +1506,49 @@ export class ChatTabManager implements vscode.Disposable {
       this.follow.replayLast(); // jump to the file π is on
     }
     // No toast: the crosshair + status bar already show the state.
+  }
+
+  private async handleToggleDisplayMode(
+    key: 'piRpc.showToolDetails' | 'piRpc.showThinking'
+  ): Promise<void> {
+    const current = this.context.workspaceState.get<boolean>(key) ?? false;
+    await this.context.workspaceState.update(key, !current);
+    await this.rerenderAll();
+  }
+
+  private async handleRestoreInterruptedPrompt(
+    resource: vscode.Uri,
+    context: ChatTabContext
+  ): Promise<void> {
+    const snapshot = context.controller.snapshot;
+    const interrupted = detectInterruptedTurn(
+      snapshot.messages,
+      snapshot.connectionState,
+      snapshot.state.isStreaming === true
+    );
+    const text = interrupted?.lastUserMessage;
+    if (!text) return;
+    const composer = await this.uiState.getComposerStateForIdentity(
+      context.controller,
+      context.target
+    );
+    if (composer.draft) {
+      void vscode.window.showInformationMessage(
+        'Pi: your draft was kept. Clear it before restoring the interrupted prompt.'
+      );
+      return;
+    }
+    await this.uiState.updateDraftForIdentity(context.controller, context.target, text);
+    await this.uiState.setFocusForIdentity(context.controller, context.target, 'composer');
+    if (
+      interrupted?.canResend &&
+      !composer.pendingImages?.length &&
+      !composer.pendingContextItems?.length
+    ) {
+      await this.handleRequestSend(resource, 'prompt');
+    } else {
+      await this.renderResource(resource);
+    }
   }
 
   private async handleAbort(resource: vscode.Uri): Promise<void> {
@@ -2492,6 +2552,9 @@ export class ChatTabManager implements vscode.Disposable {
 
   private async onControllerChanged(controller: SessionController): Promise<void> {
     this.lastActivityAt.set(controller, Date.now());
+    const event = controller.snapshot.eventHistory.at(-1);
+    const freshEvent = event !== this.lastObservedEvent.get(controller);
+    if (event) this.lastObservedEvent.set(controller, event);
     void this.turnReview?.observeTools(controller);
     this.detectTurnCompletion(controller);
     this.observeOutbox(controller);
@@ -2509,6 +2572,19 @@ export class ChatTabManager implements vscode.Disposable {
     // changes, but the SAME tab must keep showing it (no new chat).
     const owner = this.sessions.ownerOf(controller);
     if (owner) {
+      const host = this.hosts.get(owner.toString());
+      const update = event?.data.assistantMessageEvent;
+      const deltaType =
+        update && typeof update === 'object' && 'type' in update ? update.type : undefined;
+      const streamingDelta =
+        (event?.type === 'message_update' &&
+          typeof deltaType === 'string' &&
+          deltaType.endsWith('_delta')) ||
+        event?.type === 'tool_execution_update';
+      if (host && !host.panel.visible && freshEvent && streamingDelta) {
+        this.pendingVisibleFlush.add(owner.toString());
+        return;
+      }
       await this.renderResource(owner);
     }
   }
@@ -2736,9 +2812,13 @@ export class ChatTabManager implements vscode.Disposable {
       .get<boolean>('requireApprovalForEdits', false);
     snapshot.approvalModeError = approvalGateSyncError();
     snapshot.activeSessionCount = sharedPiHostActiveSessionCount();
+    snapshot.showToolDetails =
+      this.context.workspaceState.get<boolean>('piRpc.showToolDetails') ?? false;
+    snapshot.showThinking = this.context.workspaceState.get<boolean>('piRpc.showThinking') ?? false;
     const title = this.titleForContext(context, snapshot);
     const host = this.hosts.get(resource.toString());
     if (host) {
+      if (host.panel.visible) this.pendingVisibleFlush.delete(resource.toString());
       this.follow.logger = this.logger;
       this.follow.handleSnapshot(
         this.keyFor(resource),
@@ -2868,6 +2948,13 @@ export class ChatTabManager implements vscode.Disposable {
       if (this.outbox && context.target.kind !== 'workspaceDraft') {
         snapshot.outbox = await this.outbox.snapshot(chatTargetSessionKey(context.target));
         snapshot.outbox.notice ??= this.outboxNotices.get(snapshot.outbox.key);
+        if (
+          snapshot.connectionState === 'ready' &&
+          snapshot.outbox.items.some((item) => item.status === 'paused')
+        ) {
+          snapshot.outbox.notice ??=
+            'Queued messages remain paused after reconnect. Review them and choose Resume in the Outbox to send.';
+        }
         snapshot.outboxAck = this.outboxAcks.get(context.resource.toString());
         if (
           snapshot.outbox.items.some((item) => item.status !== 'accepted') &&

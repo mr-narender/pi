@@ -36,6 +36,16 @@ function snapshot(overrides: Partial<WebviewSnapshot> = {}): WebviewSnapshot {
   };
 }
 
+test('paused restart items expose an explicit Resume action without automatic send', () => {
+  const s = snapshot({ connectionState: 'ready', isStreaming: false });
+  s.outbox!.items[0]!.status = 'paused';
+  const doc = new JSDOM(renderChatApp(s)).window.document;
+  const action = doc.querySelector<HTMLButtonElement>('[data-outbox-action="resume"]');
+  assert.equal(action?.textContent, 'Resume');
+  assert.equal(action?.disabled, false);
+  assert.match(doc.querySelector('.outbox-row')!.textContent!, /Paused · review before sending/);
+});
+
 test('outbox actions validate identity, revision and save-only bounded text at the boundary', () => {
   const base = { type: 'outboxAction', key: 'chat-key', id: 'first', revision: 2 };
   for (const action of ['edit', 'cancel', 'remove', 'resume', 'steer', 'discard'])
