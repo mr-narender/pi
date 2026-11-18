@@ -294,7 +294,9 @@ export class SharedPiHost {
     string,
     { handle: PiProcessHandle; conn: HostWorkerConn; info: SdkSessionOpen }
   >();
-  private prewarmTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly prewarmTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly prewarmLaunches = new Map<string, SdkSessionOpen>();
+  private disposed = false;
 
   public constructor(
     private readonly hostScript: string,
@@ -400,17 +402,23 @@ export class SharedPiHost {
   }
 
   private warmingPool = false;
-  private warmupLaunch?: Pick<SdkSessionOpen, 'cwd' | 'env' | 'sdkRoot'>;
+  private warmupLaunch?: SdkSessionOpen;
+  private readonly pendingWarmups = new Map<
+    string,
+    { prewarmCwd?: string; launch?: SdkSessionOpen }
+  >();
 
   /**
-   * Boot the WHOLE pool at startup — serially (parallel cold boots contend on
-   * CPU), each worker confirmed warm via ping before the next starts. Ends by
-   * parking the prewarmed draft session, so the first New Chat AND the first
-   * parallel burst are both instant. Safe to call once per activation; user
-   * opens arriving mid-warmup simply ride the currently-booting worker.
+   * Warm a compatible pool serially (parallel cold imports contend on CPU).
+   * Neutral sidebar launches only ping workers; chat launches also park a draft.
+   * Queue other folders behind the current warmup, retaining each exact launch.
+   * User opens arriving mid-warmup ride the currently-booting compatible worker.
    */
   public warmPool(prewarmCwd?: string, launch = this.warmupLaunch): void {
+    if (this.disposed) return;
+    if (prewarmCwd && launch) this.prewarmLaunches.set(prewarmCwd, launch);
     if (this.warmingPool) {
+      this.pendingWarmups.set(launch?.cwd ?? '', { prewarmCwd, launch });
       return;
     }
     this.warmingPool = true;
@@ -429,6 +437,7 @@ export class SharedPiHost {
         const cwd = launch?.cwd;
         let firstWarm = false;
         for (;;) {
+          if (this.disposed) return;
           const live = this.conns.filter(
             (conn) =>
               !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironmentKey(envKey, cwd)
@@ -458,36 +467,42 @@ export class SharedPiHost {
         );
       } finally {
         this.warmingPool = false;
+        const next = this.pendingWarmups.entries().next().value;
+        if (next) {
+          this.pendingWarmups.delete(next[0]);
+          this.warmPool(next[1].prewarmCwd, next[1].launch);
+        }
       }
     })();
   }
 
   /** Park a ready draft session for this cwd so the next New Chat is instant. */
   public schedulePrewarm(cwd: string, delayMs = 3000): void {
-    if (this.prewarmTimer || this.parked.has(cwd)) {
+    if (this.disposed || this.prewarmTimers.has(cwd) || this.parked.has(cwd)) {
       return;
     }
-    this.prewarmTimer = setTimeout(() => {
-      this.prewarmTimer = undefined;
-      void this.prewarm(cwd);
+    const launch = this.prewarmLaunches.get(cwd);
+    const timer = setTimeout(() => {
+      this.prewarmTimers.delete(cwd);
+      void this.prewarm(cwd, launch);
     }, delayMs);
-    this.prewarmTimer.unref?.();
+    this.prewarmTimers.set(cwd, timer);
+    timer.unref?.();
   }
 
-  private async prewarm(cwd: string): Promise<void> {
-    if (this.parked.has(cwd)) {
+  private async prewarm(cwd: string, launch = this.prewarmLaunches.get(cwd)): Promise<void> {
+    if (this.disposed || this.parked.has(cwd)) {
       return;
     }
     try {
-      // Prewarm with the SAME launch plan the warmup used, so the parked session
-      // matches the first supervisor request for this cwd.
+      // Capture this folder's launch, never the most recently warmed folder's.
+      // Explicit CLI/trust/IDE args must match the next supervisor request.
       const prewarmInfo: SdkSessionOpen = {
+        ...launch,
         cwd,
-        ...(this.warmupLaunch?.sdkRoot ? { sdkRoot: this.warmupLaunch.sdkRoot } : {}),
-        ...(this.warmupLaunch?.env ? { env: this.warmupLaunch.env } : {}),
       };
       const opened = await this.openSessionRaw(prewarmInfo);
-      if (this.parked.has(cwd)) {
+      if (this.disposed || this.parked.has(cwd)) {
         await opened.handle.stop();
         return;
       }
@@ -515,22 +530,31 @@ export class SharedPiHost {
     // sdkRoot + env match (the keys that affect runtime behaviour).
     if (!info.sessionFile && !info.dedicated) {
       const parked = this.parked.get(info.cwd);
-      if (
-        parked &&
-        !parked.conn.fault &&
-        JSON.stringify(info.args ?? ['--mode', 'rpc', '--no-approve']) ===
-          JSON.stringify(parked.info.args ?? ['--mode', 'rpc', '--no-approve']) &&
-        parked.conn.piRoot === (info.sdkRoot ?? (await this.resolvePiRoot())) &&
-        parked.conn.matchesEnvironmentKey(
-          HostWorkerConn.computeEnvKey(info.env ?? this.baseEnv),
-          info.cwd
-        )
-      ) {
-        this.parked.delete(info.cwd);
-        this.schedulePrewarm(info.cwd);
-        this.logger.info(`Adopted prewarmed Pi session for ${info.cwd}`);
-        onOpening?.(parked.handle);
-        return parked.handle;
+      // Reserve synchronously: SDK resolution may yield to another New Chat.
+      if (parked) this.parked.delete(info.cwd);
+      let adopted = false;
+      try {
+        if (
+          parked &&
+          !parked.conn.fault &&
+          JSON.stringify(info.args ?? ['--mode', 'rpc', '--no-approve']) ===
+            JSON.stringify(parked.info.args ?? ['--mode', 'rpc', '--no-approve']) &&
+          parked.conn.piRoot === (info.sdkRoot ?? (await this.resolvePiRoot())) &&
+          parked.conn.matchesEnvironmentKey(
+            HostWorkerConn.computeEnvKey(info.env ?? this.baseEnv),
+            info.cwd
+          )
+        ) {
+          adopted = true;
+          this.schedulePrewarm(info.cwd);
+          this.logger.info(`Adopted prewarmed Pi session for ${info.cwd}`);
+          onOpening?.(parked.handle);
+          return parked.handle;
+        }
+      } finally {
+        if (parked && !adopted && !this.disposed && !this.parked.has(info.cwd)) {
+          this.parked.set(info.cwd, parked);
+        }
       }
     }
     return (await this.openSessionRaw(info, openTimeoutMs, onOpening)).handle;
@@ -640,10 +664,11 @@ export class SharedPiHost {
   }
 
   public dispose(): void {
-    if (this.prewarmTimer) {
-      clearTimeout(this.prewarmTimer);
-      this.prewarmTimer = undefined;
-    }
+    this.disposed = true;
+    for (const timer of this.prewarmTimers.values()) clearTimeout(timer);
+    this.prewarmTimers.clear();
+    this.prewarmLaunches.clear();
+    this.pendingWarmups.clear();
     this.parked.clear();
     for (const conn of [...this.conns]) {
       conn.terminate();

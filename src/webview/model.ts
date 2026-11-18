@@ -755,12 +755,32 @@ export function detectInterruptedTurn(
   if (last.role === 'user') {
     return { lastUserMessage: userText(last), canResend: canResend(last), kind: 'noReply' };
   }
-  // A turn also remains incomplete if reconcile ends at a tool call/result,
-  // before the assistant's final answer was persisted.
-  if (
-    (last.role === 'assistant' && (!last.stopReason || last.stopReason === 'toolUse')) ||
-    ['toolResult', 'tool_result', 'tool'].includes(String(last.role))
-  ) {
+  // A tool may legitimately end the turn (terminate / finishTurn: end).
+  // Only unmatched calls, not the absence of a final prose answer, imply a cut-off.
+  let turnStart = messages.length - 1;
+  while (turnStart >= 0 && messages[turnStart]?.role !== 'user') turnStart--;
+  const turn = messages.slice(turnStart + 1);
+  const assistant = [...turn].reverse().find((message) => message.role === 'assistant');
+  const resultIds = new Set(
+    turn
+      .filter((message) => ['toolResult', 'tool_result', 'tool'].includes(String(message.role)))
+      .map((message) => message.toolCallId)
+  );
+  const unmatchedCalls = turn.some(
+    (message) =>
+      message.role === 'assistant' &&
+      message.stopReason === 'toolUse' &&
+      Array.isArray(message.content) &&
+      message.content.some(
+        (block) =>
+          block &&
+          typeof block === 'object' &&
+          !Array.isArray(block) &&
+          block.type === 'toolCall' &&
+          (typeof block.id !== 'string' || !resultIds.has(block.id))
+      )
+  );
+  if ((assistant && !assistant.stopReason) || unmatchedCalls) {
     // Find the user message that triggered this turn.
     for (let i = messages.length - 2; i >= 0; i--) {
       if (messages[i]?.role === 'user') {

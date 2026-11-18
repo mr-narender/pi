@@ -623,7 +623,7 @@
         "piRpc.autoStart": {
           "type": "boolean",
           "default": false,
-          "description": "Start Pi automatically when a trusted file workspace is opened."
+          "description": "Warm the shared Pi runtime eagerly when a chat sidebar or tab becomes visible. Never starts a workspace session just by opening a window."
         },
         "piRpc.launchShell": {
           "type": "string",
@@ -1118,19 +1118,19 @@
       },
       {
         "command": "piRpc.toggleToolDetails",
-        "key": "ctrl+alt+o",
+        "key": "ctrl+k alt+o",
         "mac": "cmd+alt+o",
         "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
       },
       {
         "command": "piRpc.toggleThinking",
-        "key": "ctrl+alt+t",
+        "key": "ctrl+k alt+t",
         "mac": "cmd+alt+t",
         "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
       },
       {
         "command": "piRpc.toggleDetailMode",
-        "key": "ctrl+alt+d",
+        "key": "ctrl+k alt+d",
         "mac": "cmd+alt+d",
         "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
       }

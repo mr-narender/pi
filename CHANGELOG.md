@@ -8,8 +8,13 @@
 
 - With Pi ≥1.5, resumed chats re-enable registered extension tools absent from
   the recorded loadout (native Pi behaviour).
-- Add workspace-persisted tool-output and thinking display toggles (Cmd/Ctrl+Alt+O/T,
-  or both with Cmd/Ctrl+Alt+D), with visible chat toolbar controls. Group live
+- Defer runtime warmup and session indexing until a chat surface opens; autoStart
+  now eagerly warms visible chat surfaces without starting a first-folder session.
+  Prewarm matching folder drafts for the next New Chat, including restored tabs.
+- Honor idle extension shutdown requests, wait for in-flight work before disposal,
+  guard repeated host signals, and reserve parked drafts before concurrent adoption.
+- Add workspace-persisted tool-output and thinking display toggles (macOS Cmd+Alt+O/T/D;
+  Windows/Linux Ctrl+K Alt+O/T/D chords avoid AltGr), with visible chat toolbar controls. Group live
   delegated tools by parent call without guessing individual agent attribution.
 - Coalesce hidden-chat streaming deltas until reveal while retaining state and
   completion snapshots; cache unchanged code highlighting. Offer text-only prompt

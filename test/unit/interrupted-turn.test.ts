@@ -75,7 +75,7 @@ test('connecting → no interruption detected', () => {
   assert.equal(detectInterruptedTurn(messages, 'starting', false), undefined);
 });
 
-test('reconciled tool call or result without a final assistant answer is interrupted', () => {
+test('unmatched tool call remains interrupted until its matching result arrives', () => {
   const messages = [
     { role: 'user', content: 'Inspect the code' },
     {
@@ -87,7 +87,7 @@ test('reconciled tool call or result without a final assistant answer is interru
   assert.equal(detectInterruptedTurn(messages, 'ready', false)?.kind, 'incompleteReply');
   assert.equal(
     detectInterruptedTurn(
-      [...messages, { role: 'toolResult', content: 'File content' }],
+      [...messages, { role: 'toolResult', toolCallId: 'unrelated', content: 'File content' }],
       'ready',
       false
     )?.lastUserMessage,
@@ -103,4 +103,60 @@ test('completed conversation → no interruption', () => {
     { role: 'assistant', content: [{ type: 'text', text: 'Thanks' }], stopReason: 'stop' },
   ];
   assert.equal(detectInterruptedTurn(messages, 'ready', false), undefined);
+});
+
+for (const role of ['toolResult', 'tool_result', 'tool']) {
+  test(`completed tool results (${role}) may end a turn without a final assistant reply`, () => {
+    const messages = [
+      { role: 'user', content: 'Finish the task' },
+      {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [
+          { type: 'toolCall', id: 'one', name: 'read' },
+          { type: 'toolCall', id: 'two', name: 'terminate' },
+        ],
+      },
+      { role, toolCallId: 'one', content: 'done' },
+    ];
+    assert.equal(detectInterruptedTurn(messages, 'ready', false)?.kind, 'incompleteReply');
+    assert.equal(
+      detectInterruptedTurn(
+        [...messages, { role, toolCallId: 'two', content: 'done' }],
+        'ready',
+        false
+      ),
+      undefined
+    );
+  });
+}
+
+test('toolUse without tool calls is complete and earlier turns do not leak interruption', () => {
+  assert.equal(
+    detectInterruptedTurn(
+      [
+        { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'old' }] },
+        { role: 'user', content: 'New turn' },
+        { role: 'assistant', stopReason: 'toolUse', content: [] },
+      ],
+      'ready',
+      false
+    ),
+    undefined
+  );
+});
+
+test('last assistant without stopReason remains interrupted even after tool results', () => {
+  assert.equal(
+    detectInterruptedTurn(
+      [
+        { role: 'user', content: 'Read' },
+        { role: 'assistant', content: [{ type: 'toolCall', id: 'one' }] },
+        { role: 'toolResult', toolCallId: 'one', content: 'done' },
+      ],
+      'ready',
+      false
+    )?.kind,
+    'incompleteReply'
+  );
 });

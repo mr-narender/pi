@@ -344,7 +344,8 @@ export class ChatTabManager implements vscode.Disposable {
     private readonly context: vscode.ExtensionContext,
     private readonly registry: SessionRegistry,
     private readonly uiState: ChatUiState,
-    private readonly logger: DiagnosticsLogger
+    private readonly logger: DiagnosticsLogger,
+    private readonly onChatSurface?: () => void
   ) {
     this.outbox = new OutboxStore(join(context.globalStorageUri.fsPath, 'outbox'));
     this.cache = new ChatTabStateCache(context);
@@ -494,6 +495,7 @@ export class ChatTabManager implements vscode.Disposable {
     document: ChatEditorDocument,
     panel: vscode.WebviewPanel
   ): Promise<void> {
+    this.onChatSurface?.();
     // Hosts are keyed by RESOURCE URI (stable) — NOT by session key: binding a
     // draft to its session changes keyFor()'s answer for the same URI, which
     // orphaned the host entry and silently dropped every live repaint.
@@ -921,6 +923,7 @@ export class ChatTabManager implements vscode.Disposable {
     if (!context) {
       return undefined;
     }
+    this.onChatSurface?.();
     this.registry.setActive(context.controller);
     this.lastActivityAt.set(context.controller, Date.now());
     const workspaceKey = context.target.workspaceFolderUri;

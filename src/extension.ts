@@ -13,7 +13,6 @@ import {
   usablePathPiRoot,
   selectedSdkRoot,
   isSupportedPiSdkVersion,
-  resolvePiLaunch,
   invalidatePiLaunchCache,
   piLaunchEnvironment,
 } from './process/piLauncher';
@@ -235,49 +234,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
     }
   });
-  {
-    // Both shared and dedicated SDK sessions use the same typed transport/host.
-    const workers = getSettings().runtimeWorkers;
-    const sharedHost = initSharedPiHost(
-      context.extensionPath,
-      process.env,
-      logger,
-      resolvePiRoot,
-      workers === 'auto' ? undefined : workers,
-      vscode.Uri.joinPath(context.globalStorageUri, 'v8-cache').fsPath
-    );
-    context.subscriptions.push({ dispose: () => disposeSharedPiHost() });
-    // Warm workers for the actual workspace launch without creating a draft
-    // that would omit the chat's CLI/trust/resource options.
-    const warmSettings = getSettings();
-    const warmPathPi = detectPathPi();
-    const piAvailable =
-      selectedSdkRoot(warmSettings) !== undefined ||
-      (warmSettings.piSource === 'managed' &&
-        warmSettings.executable === 'pi' &&
-        !warmPathPi &&
-        warmSettings.autoInstall);
-    if (piAvailable && warmSettings.sharedRuntime && warmSettings.piSource !== 'external') {
-      const folder = vscode.workspace.workspaceFolders?.[0];
-      if (folder) {
+  const workers = getSettings().runtimeWorkers;
+  const sharedHost = initSharedPiHost(
+    context.extensionPath,
+    process.env,
+    logger,
+    resolvePiRoot,
+    workers === 'auto' ? undefined : workers,
+    vscode.Uri.joinPath(context.globalStorageUri, 'v8-cache').fsPath
+  );
+  context.subscriptions.push({ dispose: () => disposeSharedPiHost() });
+  // Sidebar discovery must never resolve project resources or create a session.
+  // Tabs warm their own exact launch in the supervisor after opening.
+  let sidebarWarmRequested = false;
+  let warmTimer: ReturnType<typeof setTimeout> | undefined;
+  const warmSidebar = (): void => {
+    if (sidebarWarmRequested) return;
+    sidebarWarmRequested = true;
+    warmTimer = setTimeout(
+      () => {
+        warmTimer = undefined;
+        const settings = getSettings();
+        if (!settings.sharedRuntime || settings.piSource === 'external') return;
         void resolvePiRoot()
-          .then(() => {
-            const settings = getSettings();
-            const launch = resolvePiLaunch(
-              settings,
-              piLaunchEnvironment(settings),
-              folder.uri.fsPath
-            );
-            if (settings.sharedRuntime && settings.piSource !== 'external' && launch.sdkRoot) {
-              sharedHost.warmPool(undefined, launch);
-            }
+          .then(async (sdkRoot) => {
+            const { mkdir } = await import('node:fs/promises');
+            await mkdir(context.globalStorageUri.fsPath, { recursive: true });
+            sharedHost.warmPool(undefined, {
+              cwd: context.globalStorageUri.fsPath,
+              sdkRoot,
+              env: piLaunchEnvironment(settings),
+            });
           })
-          .catch((error: unknown) => {
-            logger.warn(`Runtime warmup unavailable: ${String(error)}`);
-          });
-      }
-    }
-  }
+          .catch((error: unknown) => logger.warn(`Runtime warmup unavailable: ${String(error)}`));
+      },
+      getSettings().autoStart ? 0 : 100
+    );
+  };
+  context.subscriptions.push({ dispose: () => clearTimeout(warmTimer) });
   // Record the loaded build in the output channel only (no user-facing toast).
   logger.info(
     `Pi extension activating: v${String(
@@ -290,7 +284,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   const sessionIndex = new SessionIndexService(context.extensionPath, logger);
   const registry = new SessionRegistry(logger, sessionIndex);
-  const settings = getSettings();
   const statusBar = new StatusBarController();
   context.subscriptions.push({ dispose: () => sessionIndex.dispose() });
   const recentSessions = new RecentSessionService(sessionIndex);
@@ -298,7 +291,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Rehydrate the chat URI short-id map before any custom-editor tab is
   // restored, so restored tabs resolve to their session identity.
   initChatUriRegistry(context.globalState, context.workspaceState);
-  const chatTabs = new ChatTabManager(context, registry, uiState, logger);
+  const sessionDirWatcher = new SessionDirWatcher(registry, recentSessions, logger);
+  context.subscriptions.push(sessionDirWatcher);
+  let watchingSessions = false;
+  const startSessionWatch = (): void => {
+    if (watchingSessions) return;
+    watchingSessions = true;
+    sessionDirWatcher.start();
+  };
+  const chatTabs = new ChatTabManager(context, registry, uiState, logger, startSessionWatch);
   deactivateChatTabs = () => chatTabs.dispose();
   const turnReview = new TurnReview(logger, context.workspaceState);
   const inlineReview = new InlineReview(turnReview);
@@ -306,6 +307,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // The sidebar always owns the Agentic chat list; conversations open in tabs.
   let agenticListHost: AgenticChatListHost | undefined;
   const attachSidebar = (view: vscode.WebviewView): void => {
+    const reveal = (): void => {
+      startSessionWatch();
+      warmSidebar();
+    };
+    reveal();
+    context.subscriptions.push(
+      view.onDidChangeVisibility(() => {
+        if (view.visible) reveal();
+      })
+    );
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
       view.webview.html =
@@ -391,16 +402,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   statusBar.bind(registry.getActive());
-  void recentSessions.refresh();
+
   // No global warm-start: with the PER-TAB controller model each chat tab owns
   // and starts its own Pi process on activation (parallel sessions), so a
   // folder-level warm-start would only spawn an orphan Pi + session. Tabs start
   // on demand in activateResource.
   // Keep the chat list in sync with the terminal (TUI): watch the on-disk
   // sessions dir and refresh live when Pi writes to it from a terminal.
-  const sessionDirWatcher = new SessionDirWatcher(registry, recentSessions, logger);
-  sessionDirWatcher.start();
-  context.subscriptions.push(sessionDirWatcher);
   const chatStatus = (controller: SessionController): 'busy' | 'waiting' | 'idle' | 'faulted' => {
     const snap = controller.snapshot;
     if (snap.connectionState === 'faulted') {
@@ -1814,22 +1822,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     })
   );
-  const firstFolder = vscode.workspace.workspaceFolders?.[0];
-  // Restored chat tabs start their own sessions; do not allocate an unrelated first-folder chat.
-  const hasChatTab = vscode.window.tabGroups.all.some((group) =>
-    group.tabs.some((tab) => {
-      const input = tab.input as { viewType?: string } | undefined;
-      return input?.viewType === 'piRpc.chatEditor';
-    })
-  );
-  if (settings.autoStart && vscode.workspace.isTrusted && firstFolder && !hasChatTab) {
-    const controller = registry.getOrCreate(firstFolder);
-    broker.track(controller);
-    registry.setActive(controller);
-    statusBar.bind(controller);
-    await controller.start();
-    refreshViews();
-  }
 }
 export async function deactivate(): Promise<void> {
   await deactivateChatTabs?.();

@@ -7,6 +7,7 @@ import { piLaunchEnvironment, PI_SDK_RANGE } from '../../src/process/piLauncher'
 test('scopes controller and supervisor: shared/dedicated startup carry argv/env before first session; correlated controller mutation', async () => {
   const liveSettings: Record<string, unknown> = {};
   const opens: any[] = [];
+  const warmups: any[] = [];
   const handle = {
     stdin: new PassThrough(),
     stdout: new PassThrough(),
@@ -16,6 +17,7 @@ test('scopes controller and supervisor: shared/dedicated startup carry argv/env 
     stop: async () => {},
   };
   const host = {
+    warmPool: (...args: any[]) => warmups.push(args),
     openSession: async (info: any) => {
       opens.push(info);
       return handle;
@@ -127,6 +129,21 @@ test('scopes controller and supervisor: shared/dedicated startup carry argv/env 
     assert.equal(open.env.PI_LAUNCH_SHELL, '/owned/shell');
     assert.equal(open.env.PI_TELEMETRY, '0');
     assert.equal(open.env.PI_SKIP_VERSION_CHECK, '1');
+    assert.equal(warmups.length, 1, 'only shared mode prewarms the next draft');
+    if (sharedRuntime) {
+      const [cwd, launch] = warmups[0];
+      assert.equal(cwd, open.cwd);
+      assert.equal(launch.sdkRoot, open.sdkRoot);
+      assert.equal(launch.env, open.env);
+      assert.deepEqual(launch.args, [
+        '--mode',
+        'rpc',
+        '--offline',
+        '--no-approve',
+        ...open.args.slice(7),
+      ]);
+      assert.equal(launch.sessionFile, undefined);
+    }
     await supervisor.stop();
   }
 

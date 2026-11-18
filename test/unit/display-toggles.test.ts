@@ -35,7 +35,7 @@ test('display toolbar defaults hidden and reflects both persisted modes', () => 
   assert.match(shown, /data-action="toggleThinking"[^>]+aria-pressed="true"/);
 });
 
-test('display keybindings avoid file-open keys and stay scoped to Pi', () => {
+test('display keybindings avoid AltGr and file-open keys and stay scoped to Pi', () => {
   for (const [command, key] of [
     ['toggleToolDetails', 'o'],
     ['toggleThinking', 't'],
@@ -44,7 +44,7 @@ test('display keybindings avoid file-open keys and stay scoped to Pi', () => {
     const binding = manifest.contributes.keybindings.find(
       (item) => item.command === `piRpc.${command}`
     );
-    assert.equal(binding?.key, `ctrl+alt+${key}`);
+    assert.equal(binding?.key, `ctrl+k alt+${key}`);
     assert.equal(binding?.mac, `cmd+alt+${key}`);
     assert.equal(
       binding?.when,

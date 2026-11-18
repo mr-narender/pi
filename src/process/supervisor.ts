@@ -122,6 +122,16 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           }
         );
         if (startEpoch !== this.startEpoch) throw cancelled();
+        if (this.settings.sharedRuntime) {
+          // Capture the same trust, IDE extension, offline and user arguments as
+          // the next default chat; a resumed file is never part of a parked draft.
+          sharedHost.warmPool(cwd, {
+            cwd,
+            sdkRoot: launch.sdkRoot,
+            env,
+            args: this.buildArgs(undefined, { offline }),
+          });
+        }
         this.logger.info(
           `Starting Pi for ${this.folder.name} (generation=${this.generation}) via ${backendLabel} ` +
             `[cwd=${this.folder.uri.fsPath}, session=${existingSessionPath ?? '(new)'}]`

@@ -351,7 +351,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
   let shutdownRequested = false;
   let shuttingDown = false;
   let initializing = true;
-  const signalCleanupHandlers = [];
+  let activeCommands = 0;
   const cancelPendingDialogs = (reason) => {
     for (const pending of [...pendingExtensionRequests.values()]) pending.cancel(reason);
   };
@@ -591,6 +591,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
       },
       shutdownHandler: () => {
         shutdownRequested = true;
+        setImmediate(() => void checkShutdownRequested());
       },
       onError: (err) => {
         extensionErrors++;
@@ -615,20 +616,6 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     unsubscribeBackpressure = session.agent.subscribe(async () => {
       await waitForRawStdoutBackpressure();
     });
-  };
-  const registerSignalHandlers = () => {
-    const signals = ['SIGTERM'];
-    if (process.platform !== 'win32') {
-      signals.push('SIGHUP');
-    }
-    for (const signal of signals) {
-      const handler = () => {
-        // session dispose handles child-process cleanup via the SDK
-        void shutdown(signal === 'SIGHUP' ? 129 : 143, signal);
-      };
-      process.on(signal, handler);
-      signalCleanupHandlers.push(() => process.off(signal, handler));
-    }
   };
   const authCommands = createAuthCommands(() => session);
   const importCommands = createImportCommands(() => runtimeHost);
@@ -872,6 +859,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
         let preflightSucceeded = false;
         const reservation = {};
         promptPending.add(reservation);
+        activeCommands++;
         const release = () => promptPending.delete(reservation);
         void session
           .prompt(command.message, {
@@ -898,7 +886,11 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
               output(error(id, 'prompt', e.message));
             }
           })
-          .finally(release);
+          .finally(() => {
+            release();
+            activeCommands--;
+            void checkShutdownRequested();
+          });
         return undefined;
       }
       case 'steer': {
@@ -1461,9 +1453,6 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     cancelPendingDialogs('closed');
     authCommands.dispose();
     await importCommands.discard();
-    for (const cleanup of signalCleanupHandlers) {
-      cleanup();
-    }
     unsubscribe?.();
     unsubscribeBackpressure?.();
     try {
@@ -1473,7 +1462,14 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     }
   }
   async function checkShutdownRequested() {
-    if (!shutdownRequested) return;
+    if (
+      !shutdownRequested ||
+      shuttingDown ||
+      activeCommands > 0 ||
+      promptPending.size > 0 ||
+      !session.isIdle
+    )
+      return;
     await dispose();
     output({ type: 'session_closed' });
   }
@@ -1499,13 +1495,13 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
       output(error(command.id, command.type, 'SDK_STARTUP_IN_PROGRESS'));
       return;
     }
+    activeCommands++;
     try {
       const response = await handleCommand(command);
       if (response) {
         output(response);
         await waitForRawStdoutBackpressure();
       }
-      await checkShutdownRequested();
     } catch (commandError) {
       if (commandError?.[outboxAdmissionRefusal] === true) {
         output({
@@ -1527,6 +1523,9 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
         )
       );
       await waitForRawStdoutBackpressure();
+    } finally {
+      activeCommands--;
+      await checkShutdownRequested();
     }
   };
   return {
@@ -1660,7 +1659,11 @@ attachJsonlLineReader(process.stdin, (line) => {
   }
 });
 
+let hostShuttingDown = false;
+let hostSignalCount = 0;
 async function shutdownHost(code) {
+  if (hostShuttingDown) return;
+  hostShuttingDown = true;
   for (const k of new Set([...sessions.keys(), ...openingSessions.keys()])) {
     await closeSession(k);
   }
@@ -1672,9 +1675,17 @@ async function shutdownHost(code) {
   process.exit(code);
 }
 process.stdin.on('end', () => void shutdownHost(0));
-for (const sig of process.platform === 'win32' ? ['SIGTERM'] : ['SIGTERM', 'SIGHUP']) {
+for (const sig of process.platform === 'win32'
+  ? ['SIGINT', 'SIGTERM']
+  : ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(sig, () => {
-    // session dispose handles child-process cleanup via the SDK
-    void shutdownHost(sig === 'SIGHUP' ? 129 : 143);
+    hostSignalCount++;
+    const code = sig === 'SIGHUP' ? 129 : sig === 'SIGINT' ? 130 : 143;
+    if (!hostShuttingDown) {
+      void shutdownHost(code);
+    } else if (hostSignalCount > 1) {
+      // stdin may close together with the first signal; only a repeat skips cleanup.
+      process.exit(code);
+    }
   });
 }
