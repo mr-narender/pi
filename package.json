@@ -543,6 +543,21 @@
         "title": "Pi Settings",
         "category": "Pi",
         "icon": "$(gear)"
+      },
+      {
+        "command": "piRpc.toggleToolDetails",
+        "title": "Toggle Tool Output Details",
+        "category": "Pi"
+      },
+      {
+        "command": "piRpc.toggleThinking",
+        "title": "Toggle Thinking Blocks",
+        "category": "Pi"
+      },
+      {
+        "command": "piRpc.toggleDetailMode",
+        "title": "Toggle Detail Mode (Tools + Thinking)",
+        "category": "Pi"
       }
     ],
     "configuration": {
@@ -1101,6 +1116,24 @@
         "key": "ctrl+f",
         "mac": "cmd+f",
         "when": "activeCustomEditorId == 'piRpc.chatEditor' && !editorTextFocus"
+      },
+      {
+        "command": "piRpc.toggleToolDetails",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o",
+        "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
+      },
+      {
+        "command": "piRpc.toggleThinking",
+        "key": "ctrl+alt+t",
+        "mac": "cmd+alt+t",
+        "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
+      },
+      {
+        "command": "piRpc.toggleDetailMode",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d",
+        "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
       }
     ],
     "submenus": [

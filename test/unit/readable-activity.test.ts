@@ -179,7 +179,11 @@ test('dense activity groups every original read and reasoning entry without repe
     'TASK_RAW_STATUS',
   ])
     assert.match(runtime.textContent!, new RegExp(text));
-  assert.equal(doc.querySelectorAll('[data-agent-call]').length, 3);
+  assert.equal(doc.querySelectorAll('[data-agent-call]').length, 6);
+  assert.equal(
+    activity.querySelectorAll('.tl-tool > .reported-agents [data-agent-call]').length,
+    3
+  );
   assert.doesNotMatch(activity.textContent!, /verified success|verification complete/i);
 });
 

@@ -648,7 +648,16 @@ function renderWorkRow(entry: WorkEntry, order: number, snapshot?: WebviewSnapsh
       ? `<p class="activity-trace">Call execution time: ${callTime} ms · Result execution time: ${resultTime} ms</p>`
       : '';
   const trace = `<p class="activity-trace">Activity item ${order}${call?.callId || result?.callId ? ` · Call: ${escapeHtml(call?.callId ?? result?.callId ?? '')}` : ''}</p>${timingTrace}`;
-  return `<div class="tl-node ${call ? 'tl-tool' : 'tl-result'}${failed ? ' is-error' : ''}" data-activity-id="${escapeHtml(id)}"><details class="activity-row-details tl-card" data-raw-details data-preserve-open${call?.callId ? ` data-work-call="${escapeHtml(call.callId)}"` : ''} id="activity-details-${escapeHtml(id)}"><summary class="activity-row-summary tl-head">${CARET_ICON}<span class="activity-row-copy"><span class="activity-row-title">${escapeHtml(workTitle(node))}</span><span class="activity-row-meta">${call ? `<code class="tool-name">${escapeHtml(call.name)}</code>` : ''}<span class="${failed ? 'activity-row-failed' : 'muted'}">${failed ? META_ICONS.error : result ? META_ICONS.result : ''}${state}</span>${renderDuration(duration, 'Tool execution time')}</span></span></summary><div class="activity-record">${trace}${actions}${diff}${request}${response}</div></details></div>`;
+  return `<div class="tl-node ${call ? 'tl-tool' : 'tl-result'}${failed ? ' is-error' : ''}" data-activity-id="${escapeHtml(id)}"><details class="activity-row-details tl-card" data-raw-details data-preserve-open${call?.callId ? ` data-work-call="${escapeHtml(call.callId)}"` : ''} id="activity-details-${escapeHtml(id)}"><summary class="activity-row-summary tl-head">${CARET_ICON}<span class="activity-row-copy"><span class="activity-row-title">${escapeHtml(workTitle(node))}</span><span class="activity-row-meta">${call ? `<code class="tool-name">${escapeHtml(call.name)}</code>` : ''}<span class="${failed ? 'activity-row-failed' : 'muted'}">${failed ? META_ICONS.error : result ? META_ICONS.result : ''}${state}</span>${renderDuration(duration, 'Tool execution time')}</span></span></summary><div class="activity-record">${trace}${actions}${diff}${request}${response}</div></details>${
+    snapshot && call?.callId
+      ? renderDelegatedTools(snapshot, `work-${id}`, call.callId) +
+        renderReportedAgents(
+          snapshot.activity?.agents?.filter((agent) => agent.toolCallId === call.callId),
+          snapshot,
+          `work-${id}`
+        )
+      : ''
+  }</div>`;
 }
 function renderReadableWork(
   rawEntries: WorkEntry[],
@@ -1311,6 +1320,27 @@ function renderReportedTasks(plan: WebviewSnapshot['messages'][number]['reported
   return `<section class="reported-tasks" aria-label="Reported tasks"><h3>Reported tasks</h3><p class="muted">Checklist reported by Pi; completion is not independently verified.</p><ul class="plan-list">${rows}</ul></section>`;
 }
 
+function renderDelegatedTools(
+  snapshot: WebviewSnapshot,
+  scope: string,
+  parentId?: string,
+  ancestors = new Set<string>()
+): string {
+  const groups = snapshot.activity?.delegatedTools ?? [];
+  return groups
+    .filter((group) =>
+      parentId
+        ? group.toolCallId === parentId
+        : !groups.some((parent) => parent.tools.some((tool) => tool.id === group.toolCallId))
+    )
+    .filter((group) => !ancestors.has(group.toolCallId))
+    .map((group) => {
+      const visited = new Set([...ancestors, group.toolCallId]);
+      return `<details class="reported-agent-details agent-child-tools" data-preserve-open id="delegated-${escapeHtml(scope)}-${encodeURIComponent(group.toolCallId)}"><summary>Delegated tools · ${escapeHtml(group.label)}</summary><p class="muted" title="Per-agent attribution unavailable">Parent call: ${escapeHtml(group.toolCallId)} · Individual agent attribution unavailable.</p><ol class="activity-tools">${group.tools.map((tool) => `<li><span>${escapeHtml(tool.name)}</span><span class="muted">${escapeHtml(tool.status)}${tool.durationMs === undefined ? '' : ` · ${tool.durationMs} ms`}</span>${renderDelegatedTools(snapshot, scope, tool.id, visited)}</li>`).join('')}</ol></details>`;
+    })
+    .join('');
+}
+
 function renderReportedAgents(
   agents: NonNullable<WebviewSnapshot['activity']>['agents'],
   snapshot: WebviewSnapshot,
@@ -1344,7 +1374,7 @@ function renderReportedAgents(
             : labels[agent.status];
       const label = /^(?:worker|agent)$/i.test(agent.role) ? `Agent ${index + 1}` : agent.role;
       const failed = ['failed', 'timeout', 'output_limit'].includes(agent.status);
-      return `<div class="reported-agent${failed ? ' is-error' : ''}" data-agent-call="${escapeHtml(agent.toolCallId)}"><details class="reported-agent-details" data-raw-details data-preserve-open id="agent-${escapeHtml(scope)}-${encodeURIComponent(JSON.stringify([agent.toolCallId, agent.id]))}"><summary class="activity-row-summary reported-agent-head">${CARET_ICON}<span class="activity-row-copy"><span class="activity-row-title reported-agent-role">${escapeHtml(label)}</span><span class="activity-row-meta${failed ? ' activity-row-failed' : ''}">${failed ? META_ICONS.error : ''}${status}</span></span></summary><div class="reported-agent-body activity-record"><p class="muted">${agent.status === 'completed' ? 'Result received; not independently verified.' : 'Status reported by Pi.'}</p><p class="muted">${escapeHtml(agent.role)} · ${escapeHtml(agent.id)}</p>${agent.reason ? `<p>${escapeHtml(agent.reason)}</p>` : ''}${agent.output ? `<pre>${escapeHtml(agent.output)}</pre>` : ''}</div></details></div>`;
+      return `<div class="reported-agent${failed ? ' is-error' : ''}" data-agent-call="${escapeHtml(agent.toolCallId)}"><details class="reported-agent-details" data-raw-details data-preserve-open id="agent-${escapeHtml(scope)}-${encodeURIComponent(JSON.stringify([agent.toolCallId, agent.id]))}"><summary class="activity-row-summary reported-agent-head">${CARET_ICON}<span class="activity-row-copy"><span class="activity-row-title reported-agent-role">${escapeHtml(label)}</span><span class="activity-row-meta${failed ? ' activity-row-failed' : ''}">${failed ? META_ICONS.error : ''}${status}</span></span></summary><div class="reported-agent-body activity-record"><p class="muted">${agent.status === 'completed' ? 'Result received; not independently verified.' : 'Status reported by Pi.'}</p><p class="muted">${escapeHtml(agent.role)} \u00b7 ${escapeHtml(agent.id)}</p>${agent.reason ? `<p>${escapeHtml(agent.reason)}</p>` : ''}${agent.output ? `<pre>${escapeHtml(agent.output)}</pre>` : ''}</div></details></div>`;
     })
     .join('')}</section>`;
 }
@@ -1502,6 +1532,21 @@ function renderCompactionBanner(snapshot: WebviewSnapshot): string {
   return `<div class="compaction-banner" role="status"><span class="spinner spinner-sm" aria-hidden="true"></span><span><strong>Compacting context</strong>${reason ? ` · ${escapeHtml(reason)}` : ''}<span class="muted"> · Progress unavailable</span></span><span class="visually-hidden" role="progressbar" aria-label="Context compaction" aria-valuetext="In progress; percentage unavailable"></span></div>`;
 }
 
+function renderInterruptedTurnBanner(snapshot: WebviewSnapshot): string {
+  if (!snapshot.interruptedTurn) return '';
+  const { kind, canResend } = snapshot.interruptedTurn;
+  const resend =
+    canResend &&
+    !snapshot.draft &&
+    !snapshot.pendingImages.length &&
+    !snapshot.pendingContextItems.length;
+  const message =
+    kind === 'noReply'
+      ? 'This turn was interrupted \u2014 Pi never started replying.'
+      : 'This turn was interrupted \u2014 the reply is incomplete.';
+  return `<div class="interrupted-turn-banner" role="status"><span>${escapeHtml(message)} Only text is restored; reattach images/files before sending.</span>${snapshot.interruptedTurn.lastUserMessage ? `<button type="button" data-action="restoreInterruptedPrompt">${resend ? 'Resend' : 'Restore prompt'}</button>` : ''}</div>`;
+}
+
 function renderFreshSessionDetails(snapshot: WebviewSnapshot): string {
   const runtime = snapshot.runtime;
   const capability = (value: number | undefined, label: string): string =>
@@ -1553,8 +1598,20 @@ function renderMessages(
   let turnTasks: WebviewSnapshot['messages'][number]['reportedTasks'];
   const flushTurn = (): void => {
     if (!turnIds.size) return;
+    const delegatedCalls = new Set(turnCalls);
+    const includeChildren = (id: string): void => {
+      for (const group of snapshot.activity?.delegatedTools ?? []) {
+        if (group.toolCallId !== id) continue;
+        for (const tool of group.tools) {
+          if (delegatedCalls.has(tool.id)) continue;
+          delegatedCalls.add(tool.id);
+          includeChildren(tool.id);
+        }
+      }
+    };
+    for (const id of turnCalls) includeChildren(id);
     const agents =
-      snapshot.activity?.agents?.filter((agent) => turnCalls.has(agent.toolCallId)) ?? [];
+      snapshot.activity?.agents?.filter((agent) => delegatedCalls.has(agent.toolCallId)) ?? [];
     const plan = turnTasks;
     const failedAgents = agents.filter((agent) =>
       ['failed', 'timeout', 'output_limit'].includes(agent.status)
@@ -1585,6 +1642,9 @@ function renderMessages(
       ...snapshot,
       activity: {
         agents,
+        delegatedTools: snapshot.activity?.delegatedTools?.filter((group) =>
+          delegatedCalls.has(group.toolCallId)
+        ),
         tools: scopedTools,
         output: lastTool && turnCalls.has(lastTool.id) ? (snapshot.activity?.output ?? '') : '',
         files,
@@ -1962,7 +2022,7 @@ function renderOutbox(snapshot: WebviewSnapshot): string {
       ${
         item.status === 'editing'
           ? `<textarea id="outbox-editor-${escapeHtml(item.id)}" data-outbox-editor data-outbox-editor-key="${escapeHtml(outbox.key)}" data-outbox-editor-revision="${item.revision}" maxlength="160000" rows="3" aria-label="Edit outbox message"${outbox.readOnly ? ' readonly' : ''}>${escapeHtml(item.text)}</textarea>${files}<div class="outbox-actions">${button('save', 'Save')}${button('cancel', 'Cancel')}<span>Attachments unchanged</span></div><p class="outbox-hint">Save keeps it paused. Your new message draft below stays unchanged.</p>`
-          : `<p class="outbox-text">${escapeHtml(item.text)}</p>${files}${locked || editing || sending ? '' : `<div class="outbox-actions">${button('edit', 'Edit')}${button('remove', 'Remove')}${canSend && item.status !== 'queued' ? button('resume', 'Send') : ''}${canSend && snapshot.connectionState === 'busy' ? button('steer', 'Steer now') : ''}</div>`}`
+          : `<p class="outbox-text">${escapeHtml(item.text)}</p>${files}${locked || editing || sending ? '' : `<div class="outbox-actions">${button('edit', 'Edit')}${button('remove', 'Remove')}${canSend && item.status !== 'queued' ? button('resume', item.status === 'paused' ? 'Resume' : 'Send') : ''}${canSend && snapshot.connectionState === 'busy' ? button('steer', 'Steer now') : ''}</div>`}`
       }
       ${item.status === 'unknown' ? `<p class="outbox-hint">Check the chat before sending this message again. It will not be resent automatically.</p><div class="outbox-actions"><button type="button" data-outbox-action="discard" title="Does not cancel or resend anything Pi may have received"${outbox.readOnly ? ' disabled' : ''}>Discard copy</button></div>` : item.status === 'accepted' ? '<p class="outbox-hint">Handoff confirmed; Pi may still be waiting to use it.</p>' : ''}
     </div>`;
@@ -1991,7 +2051,7 @@ export function renderActivityContent(
   const activity = snapshot.activity;
   const tools = activity?.tools ?? [];
   const availableTabs: Array<typeof selected> = ['output', 'sources'];
-  if (activity?.agents?.length) availableTabs.push('agents');
+  if (activity?.agents?.length || activity?.delegatedTools?.length) availableTabs.push('agents');
   if (!availableTabs.includes(selected)) selected = 'output';
   const tabs = availableTabs
     .map(
@@ -2004,13 +2064,13 @@ export function renderActivityContent(
   const output = activityTurns.length
     ? activityTurns.join('')
     : tools.length
-      ? `<p class="muted">Current chat runtime activity</p><ol class="activity-tools">${tools.map((tool) => `<li><span>${escapeHtml(tool.name)}</span><span class="muted">${escapeHtml(tool.status)}${tool.durationMs === undefined ? '' : ` · ${escapeHtml(String(tool.durationMs))} ms`}</span></li>`).join('')}</ol>${activity?.output ? renderActivityDetails(`<pre class="activity-output">${escapeHtml(activity.output)}</pre>`, `${scope}-output`) : '<p class="muted">Waiting for tool output.</p>'}`
+      ? `<p class="muted">Current chat runtime activity</p><ol class="activity-tools">${tools.map((tool) => `<li><span>${escapeHtml(tool.name)}</span><span class="muted">${escapeHtml(tool.status)}${tool.durationMs === undefined ? '' : ` · ${escapeHtml(String(tool.durationMs))} ms`}</span>${renderDelegatedTools(snapshot, `${scope}-output`, tool.id)}</li>`).join('')}</ol>${activity?.output ? renderActivityDetails(`<pre class="activity-output">${escapeHtml(activity.output)}</pre>`, `${scope}-output`) : '<p class="muted">Waiting for tool output.</p>'}`
       : '<p class="muted">Tool activity will appear here as Pi works.</p>';
   const files = activity?.files ?? [];
   const sources = files.length
     ? `<p class="muted">Files reported by tools or attached for this reply.</p><ul class="activity-files">${files.map((file) => `<li><button type="button" data-file-open="${escapeHtml(file.path)}">${escapeHtml(file.path)}</button></li>`).join('')}</ul>`
     : '<p class="muted">No source files reported for this reply.</p>';
-  return `<div class="activity-tabs" role="tablist" aria-label="Activity views">${tabs}</div>${view('output', output)}${view('sources', sources)}${activity?.agents?.length ? view('agents', renderReportedAgents(activity.agents, snapshot, scope)) : ''}`;
+  return `<div class="activity-tabs" role="tablist" aria-label="Activity views">${tabs}</div>${view('output', output)}${view('sources', sources)}${activity?.agents?.length || activity?.delegatedTools?.length ? view('agents', renderDelegatedTools(snapshot, scope) + renderReportedAgents(activity.agents, snapshot, scope)) : ''}`;
 }
 
 export function renderModelTools(snapshot: WebviewSnapshot): string {
@@ -2151,8 +2211,12 @@ export function renderChatApp(snapshot: WebviewSnapshot, revealMessageId?: strin
 
   return `
     <a class="skip-link" href="#composer-field">Skip to composer</a>
-    <div class="layout" data-testid="chat-app" data-mermaid-session="${escapeHtml(snapshot.sessionFile || snapshot.sessionId || snapshot.workspaceFolderName || 'session')}"${chatFontStyle(snapshot)}>
+    <div class="layout" data-testid="chat-app" data-mermaid-session="${escapeHtml(snapshot.sessionFile || snapshot.sessionId || snapshot.workspaceFolderName || 'session')}"${snapshot.showToolDetails ? ' data-show-tool-details' : ''}${snapshot.showThinking ? ' data-show-thinking' : ''}${chatFontStyle(snapshot)}>
       <details id="chat-settings" class="chat-settings" data-preserve-open><summary aria-label="Chat settings">Chat settings <span aria-hidden="true">⋯</span></summary><div class="chat-settings-content">${renderModelTools(snapshot)}${renderMcpConnections(snapshot)}</div></details>
+      <div class="display-mode-toggles" aria-label="Display toggles">
+        <button type="button" class="icon-button display-toggle${snapshot.showToolDetails ? ' is-on' : ''}" data-action="toggleToolDetails" title="${snapshot.showToolDetails ? 'Hide tool details (Cmd/Ctrl+Alt+O)' : 'Show tool details (Cmd/Ctrl+Alt+O)'}" aria-label="Toggle tool details" aria-pressed="${snapshot.showToolDetails ? 'true' : 'false'}">${META_ICONS.tool}</button>
+        <button type="button" class="icon-button display-toggle${snapshot.showThinking ? ' is-on' : ''}" data-action="toggleThinking" title="${snapshot.showThinking ? 'Hide thinking (Cmd/Ctrl+Alt+T)' : 'Show thinking (Cmd/Ctrl+Alt+T)'}" aria-label="Toggle thinking" aria-pressed="${snapshot.showThinking ? 'true' : 'false'}">${META_ICONS.thinking}</button>
+      </div>
       <div class="header-summary visually-hidden" aria-label="Current chat summary">${escapeHtml(summaryLine)}</div>
       <div id="a11y-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
 
@@ -2161,6 +2225,7 @@ ${renderShareBar(snapshot)}
 ${renderRecovery(snapshot)}
 
 ${renderCompactionBanner(snapshot)}
+${renderInterruptedTurnBanner(snapshot)}
       <main class="conversation" id="messages" role="log" aria-live="off" aria-relevant="additions text">${
         connecting && snapshot.messages.length === 0
           ? `<div class="connecting-state" role="status" aria-live="polite"><div class="boot-loader" aria-hidden="true"><svg class="boot-squiggle" viewBox="0 0 104 104" role="img"><path d="M 96.0 52.0 L 97.3 54.0 L 98.2 56.0 L 98.7 58.2 L 98.7 60.2 L 98.0 62.2 L 96.8 64.0 L 95.2 65.6 L 93.3 67.0 L 91.4 68.3 L 89.7 69.6 L 88.2 70.9 L 87.2 72.3 L 86.5 74.0 L 86.1 75.9 L 85.9 78.0 L 85.7 80.3 L 85.4 82.6 L 84.8 84.8 L 83.8 86.8 L 82.5 88.3 L 80.7 89.4 L 78.6 90.0 L 76.3 90.2 L 74.0 90.1 L 71.7 89.9 L 69.6 89.7 L 67.6 89.7 L 65.9 90.2 L 64.3 91.0 L 62.8 92.2 L 61.2 93.7 L 59.6 95.3 L 57.9 96.9 L 56.0 98.2 L 54.1 99.1 L 52.0 99.4 L 49.9 99.1 L 48.0 98.2 L 46.1 96.9 L 44.4 95.3 L 42.8 93.7 L 41.2 92.2 L 39.7 91.0 L 38.1 90.2 L 36.4 89.7 L 34.4 89.7 L 32.3 89.9 L 30.0 90.1 L 27.7 90.2 L 25.4 90.0 L 23.3 89.4 L 21.5 88.3 L 20.2 86.8 L 19.2 84.8 L 18.6 82.6 L 18.3 80.3 L 18.1 78.0 L 17.9 75.9 L 17.5 74.0 L 16.8 72.3 L 15.8 70.9 L 14.3 69.6 L 12.6 68.3 L 10.7 67.0 L 8.8 65.6 L 7.2 64.0 L 6.0 62.2 L 5.3 60.2 L 5.3 58.2 L 5.8 56.0 L 6.7 54.0 L 8.0 52.0 L 9.3 50.1 L 10.6 48.4 L 11.5 46.7 L 12.0 44.9 L 12.1 43.2 L 11.8 41.2 L 11.3 39.2 L 10.7 37.0 L 10.1 34.7 L 9.9 32.4 L 10.2 30.2 L 11.0 28.3 L 12.2 26.7 L 14.0 25.4 L 16.1 24.4 L 18.3 23.7 L 20.5 23.2 L 22.6 22.6 L 24.4 21.9 L 25.9 20.9 L 27.1 19.6 L 28.1 17.9 L 29.1 16.0 L 30.0 13.9 L 31.1 11.8 L 32.4 9.9 L 34.0 8.4 L 35.8 7.5 L 37.8 7.0 L 40.0 7.2 L 42.2 7.8 L 44.4 8.7 L 46.4 9.7 L 48.4 10.6 L 50.2 11.2 L 52.0 11.4 L 53.8 11.2 L 55.6 10.6 L 57.6 9.7 L 59.6 8.7 L 61.8 7.8 L 64.0 7.2 L 66.2 7.0 L 68.2 7.5 L 70.0 8.4 L 71.6 9.9 L 72.9 11.8 L 74.0 13.9 L 74.9 16.0 L 75.9 17.9 L 76.9 19.6 L 78.1 20.9 L 79.6 21.9 L 81.4 22.6 L 83.5 23.2 L 85.7 23.7 L 87.9 24.4 L 90.0 25.4 L 91.8 26.7 L 93.0 28.3 L 93.8 30.2 L 94.1 32.4 L 93.9 34.7 L 93.3 37.0 L 92.7 39.2 L 92.2 41.2 L 91.9 43.2 L 92.0 44.9 L 92.5 46.7 L 93.4 48.4 L 94.7 50.1 L 96.0 52.0 Z" fill="none" stroke="#ff8c42" stroke-width="2.5" stroke-linecap="round"/></svg><svg class="boot-pi" viewBox="0 0 24 24" role="img"><g fill="#ff8c42"><path d="M3.2 5.4 L20 5.4 L18.4 8 L4.8 8 Z"/><rect x="6.1" y="8" width="2.7" height="10.6" rx="1.1"/><path d="M14.4 8 h2.7 v8.4 l-2.7 2.2 Z"/><path d="M9.8 19.2 l2.1 -1.6 l-2.1 -1.6 v3.2 Z" opacity="0.9"/></g></svg></div><p class="connecting-copy">${

@@ -119,6 +119,40 @@ function reportedAgents(
   return agents;
 }
 
+function delegatedTools(state: ControllerState): NonNullable<WebviewActivity['delegatedTools']> {
+  // A parent call identifies the delegation, not an individual reported agent.
+  return state.tools
+    .filter((tool) => state.tools.some((child) => child.parentToolCallId === tool.id))
+    .slice(-16)
+    .flatMap((parent) => {
+      const tools = state.tools
+        .filter((tool) => tool.parentToolCallId === parent.id)
+        .slice(-8)
+        .map((tool) => ({
+          id: displayText(tool.id, 120),
+          name: displayText(tool.name, 80),
+          status: tool.isError
+            ? ('error' as const)
+            : tool.endedAt === undefined
+              ? ('running' as const)
+              : ('completed' as const),
+          ...(typeof tool.durationMs === 'number' &&
+          Number.isFinite(tool.durationMs) &&
+          tool.durationMs >= 0
+            ? { durationMs: tool.durationMs }
+            : {}),
+        }));
+      const tasks = parent.args?.tasks;
+      const label =
+        typeof parent.args?.agent === 'string'
+          ? `${parent.name} · ${displayText(parent.args.agent, 80)}`
+          : Array.isArray(tasks)
+            ? `${parent.name} · ${tasks.length} tasks`
+            : parent.name;
+      return tools.length ? [{ toolCallId: parent.id, label, tools }] : [];
+    });
+}
+
 export function projectActivity(
   state: ControllerState,
   messages: WebviewMessageItem[],
@@ -166,6 +200,7 @@ export function projectActivity(
     tool.durationMs >= 0
       ? { durationMs: tool.durationMs }
       : {}),
+    ...(tool.parentToolCallId ? { parentToolCallId: tool.parentToolCallId } : {}),
   }));
   const latest = state.tools.at(-1);
   const statuses = Object.entries(state.statuses)
@@ -179,6 +214,7 @@ export function projectActivity(
   }
   return {
     agents: reportedAgents(state, messages, raws),
+    delegatedTools: delegatedTools(state),
     tools,
     output: outputText(latest?.result ?? latest?.partialResult),
     files: [...files].map((path) => ({ path })),
