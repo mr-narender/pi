@@ -133,6 +133,15 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
         if (attached) return attached;
       } catch (error) {
         if (startEpoch !== this.startEpoch) throw cancelled();
+        // Busy-elsewhere is a user-visible state, not a transient failure — do
+        // NOT fall back to the shared host (that would open a second controller
+        // on the same session file).
+        if (
+          error instanceof Error &&
+          'code' in error &&
+          (error as { code: string }).code === 'SDK_SESSION_BUSY_ELSEWHERE'
+        )
+          throw error;
         this.logger.warn(
           `Detached runtime unavailable (${error instanceof Error ? error.message : String(error)}); falling back to shared host`
         );
@@ -395,9 +404,12 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
 
     if (startEpoch !== this.startEpoch) throw cancelled();
 
-    // Connect to the runtime.
+    // Connect to the runtime. When re-using an existing runtime (not freshly
+    // spawned), include the target session key in acks so the server can report
+    // busy-elsewhere upfront without waiting for the open handshake.
     const conn = new DetachedIpcConnection(sdkRoot);
     const acks: Record<string, number> = {};
+    if (existingSessionPath && !runtime) acks[channelKey] = 0;
     const attachResult = await conn.connect(entry.endpoint, token!, acks);
     if (!attachResult.ok) {
       conn.dispose();
@@ -413,16 +425,34 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     // or we need to open a new one.
     let handle: PiProcessHandle;
     const sessionState = existingSessionPath ? attachResult.sessions[channelKey] : undefined;
+    if (sessionState?.state === 'busy-elsewhere') {
+      // Another VS Code window already controls this session.
+      conn.dispose();
+      throw Object.assign(new Error('This chat is open in another VS Code window'), {
+        code: 'SDK_SESSION_BUSY_ELSEWHERE',
+      });
+    }
     if (sessionState?.state === 'attached' || sessionState?.state === 'resync') {
       // Re-attach: the runtime already holds this session.
       handle = conn.attachSession(channelKey);
     } else {
       // Open a new session on the detached runtime.
-      handle = await conn.openSession(channelKey, {
-        cwd,
-        sessionFile: existingSessionPath,
-        args,
-      });
+      try {
+        handle = await conn.openSession(channelKey, {
+          cwd,
+          sessionFile: existingSessionPath,
+          args,
+        });
+      } catch (openError) {
+        // The runtime refuses open when another client controls this session.
+        if (openError instanceof Error && openError.message === 'SDK_SESSION_BUSY_ELSEWHERE') {
+          conn.dispose();
+          throw Object.assign(new Error('This chat is open in another VS Code window'), {
+            code: 'SDK_SESSION_BUSY_ELSEWHERE',
+          });
+        }
+        throw openError;
+      }
     }
 
     if (startEpoch !== this.startEpoch) {

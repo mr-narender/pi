@@ -255,7 +255,9 @@ test(
       );
 
       // --- Supervisor 2: re-attach to the same detached runtime ---
-      logLines.length = 0;
+      // Record the log offset BEFORE creating supervisor 2 so we only assert on
+      // lines emitted after this point (not leftover supervisor 1 lines).
+      const sup2LogStart = logLines.length;
       sharedHostUsed = false;
       const sup2 = new PiProcessSupervisor(folder, logger, settings, globalStorage, REPO_ROOT);
       fixture.setSummaryOutcome('success');
@@ -266,9 +268,13 @@ test(
       assert.ok(client2, 'supervisor 2 returned a client');
       assert.equal(sharedHostUsed, false, 're-attach used detached path, not shared host');
 
-      // Verify the re-attach log line.
-      const attachLog2 = logLines.find((l) => l.includes('via detached runtime'));
-      assert.ok(attachLog2, 'supervisor 2 logged detached runtime attach');
+      // Verify the re-attach log line was emitted AFTER supervisor 2 was created.
+      const sup2Logs = logLines.slice(sup2LogStart);
+      const attachLog2 = sup2Logs.find((l) => l.includes('via detached runtime'));
+      assert.ok(
+        attachLog2,
+        `supervisor 2 logged detached runtime attach (post-create logs: ${sup2Logs.join(' | ')})`
+      );
 
       // Verify the transcript is complete.
       const saved = readFileSync(sessionFile, 'utf8')

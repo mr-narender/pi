@@ -102,7 +102,11 @@ export class DetachedIpcConnection {
     const payload = msg.f.d;
     const channel = this.channels.get(key);
     if (!channel || !payload) return;
-    if (typeof msg.s === 'number' && msg.s > channel.lastSeq) channel.lastSeq = msg.s;
+    // Dedup by seq: skip frames already seen (replay/live overlap during mid-stream attach).
+    if (typeof msg.s === 'number') {
+      if (msg.s <= channel.lastSeq) return; // already delivered
+      channel.lastSeq = msg.s;
+    }
     if (payload.command === 'open' && payload.type === 'response') {
       channel.opened = payload.success === true;
       channel.onOpen?.(payload.success === true, payload.error as string | undefined);

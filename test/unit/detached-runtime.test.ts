@@ -141,6 +141,44 @@ test('endpoint: Linux falls back to TMPDIR then /tmp (not /mnt/c)', () => {
   assert.ok(sock.startsWith('/home/u/tmp/pi-vscode-'));
 });
 
+// ── WSL remote assertion: /mnt/ directories are rejected ────────────────
+test('endpoint: WSL remoteName rejects /mnt/ base and falls back to tmpdir', () => {
+  const ctx = {
+    platform: 'linux' as NodeJS.Platform,
+    env: { TMPDIR: '/mnt/c/Users/u/tmp' },
+    username: 'u',
+    uid: 1000,
+  };
+  // Without remoteName='wsl', /mnt/ is used as-is.
+  const dirNormal = runtimeDir(ctx);
+  assert.ok(dirNormal.startsWith('/mnt/c'), 'without WSL flag, /mnt/ is allowed');
+  // With remoteName='wsl', /mnt/ base is rejected → os.tmpdir() fallback.
+  const dirWsl = runtimeDir(ctx, 'wsl');
+  assert.ok(!dirWsl.startsWith('/mnt/'), `WSL guard rejected /mnt/ path: ${dirWsl}`);
+});
+
+test('endpoint: WSL remoteName with XDG_RUNTIME_DIR on Linux FS keeps it', () => {
+  const ctx = {
+    platform: 'linux' as NodeJS.Platform,
+    env: { XDG_RUNTIME_DIR: '/run/user/1000', TMPDIR: '/mnt/c/tmp' },
+    username: 'u',
+    uid: 1000,
+  };
+  const dir = runtimeDir(ctx, 'wsl');
+  assert.ok(dir.startsWith('/run/user/1000/'), `XDG_RUNTIME_DIR on Linux FS used: ${dir}`);
+});
+
+test('endpoint: WSL remoteName with XDG_RUNTIME_DIR under /mnt/ falls back to tmpdir', () => {
+  const ctx = {
+    platform: 'linux' as NodeJS.Platform,
+    env: { XDG_RUNTIME_DIR: '/mnt/c/run/user/1000', TMPDIR: '/mnt/c/tmp' },
+    username: 'u',
+    uid: 1000,
+  };
+  const dir = runtimeDir(ctx, 'wsl');
+  assert.ok(!dir.startsWith('/mnt/'), `WSL guard rejected /mnt/ XDG dir: ${dir}`);
+});
+
 // ── host: constant-time compare parity ──────────────────────────────────────
 test('host constantTimeEqual matches the TS impl', async () => {
   const { constantTimeEqual } = await host();

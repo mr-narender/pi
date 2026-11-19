@@ -1145,7 +1145,8 @@ export class SessionController implements vscode.Disposable {
         if (
           error instanceof Error &&
           'code' in error &&
-          error.code === 'SDK_STARTUP_MODEL_AMBIGUOUS'
+          (error.code === 'SDK_STARTUP_MODEL_AMBIGUOUS' ||
+            error.code === 'SDK_SESSION_BUSY_ELSEWHERE')
         )
           break;
       }
