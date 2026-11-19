@@ -20,6 +20,10 @@ import {
 import { registerChatOps } from './commands/chatOps';
 import { promptChatName, trackSessionName } from './commands/nameCommand';
 import { initSharedPiHost, disposeSharedPiHost } from './process/sharedPiHost';
+import {
+  detachedRuntimeBaseDir,
+  stopBackgroundRuntimes,
+} from './process/detachedRuntime/stopRuntimes';
 import { TurnReview } from './review/turnReview';
 import { syncApprovalGateForWorkspace, toggleApprovalGateMode } from './review/approvalGate';
 import { pickChatModel } from './commands/modelPicker';
@@ -1340,6 +1344,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
     void vscode.window.showInformationMessage(
       'Pi shared runtime restarted. Open chats will reconnect on their next action.'
+    );
+  });
+  // Explicit kill switch for detached runtimes: SIGTERM each live one and prune
+  // the per-user registry. Idle ones also exit on their own after idleMinutes.
+  registrations.set('piRpc.stopBackgroundRuntimes', async () => {
+    const baseDir = detachedRuntimeBaseDir(context.globalStorageUri.fsPath);
+    const { stopped } = stopBackgroundRuntimes(baseDir);
+    void vscode.window.showInformationMessage(
+      stopped > 0
+        ? `Stopped ${stopped} background Pi runtime${stopped === 1 ? '' : 's'}.`
+        : 'No background Pi runtimes are running.'
     );
   });
   registrations.set('piRpc.showPiCommands', async () => {

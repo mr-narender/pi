@@ -1620,9 +1620,12 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
 // redirected to stderr above so JSONL on fd 1 is never corrupted by SDK
 // console.log calls.
 // ===========================================================================
-const hostEmit = (k, obj) => {
+// Outbound sink: stdio by default; replaced by the detached IPC server when
+// PI_HOST_IPC_ENDPOINT is set so the runtime can outlive the extension host.
+let outboundSink = (k, obj) => {
   writeRawStdout(serializeJsonLine({ k, d: obj }));
 };
+const hostEmit = (k, obj) => outboundSink(k, obj);
 
 const sessions = new Map();
 const openingSessions = new Map();
@@ -1698,7 +1701,7 @@ async function closeSession(k, reason = 'host-shutdown') {
   }
 }
 
-attachJsonlLineReader(process.stdin, (line) => {
+function handleInboundEnvelope(line) {
   let env;
   try {
     env = JSON.parse(line);
@@ -1734,7 +1737,8 @@ attachJsonlLineReader(process.stdin, (line) => {
       error: 'session not open',
     });
   }
-});
+}
+attachJsonlLineReader(process.stdin, handleInboundEnvelope);
 
 let hostShuttingDown = false;
 let hostSignalCount = 0;
@@ -1764,7 +1768,12 @@ async function shutdownHost(code, reason) {
   clearTimeout(hostDeadlineTimer);
   process.exit(code);
 }
-process.stdin.on('end', () => void shutdownHost(0, 'stdin-closed'));
+// In detached IPC mode stdin is not the client channel, so its EOF must NOT
+// shut the runtime down (that is the whole point of detachment). Lifecycle is
+// governed by the idle manager + active-turn tracking below.
+if (!process.env?.PI_HOST_IPC_ENDPOINT) {
+  process.stdin.on('end', () => void shutdownHost(0, 'stdin-closed'));
+}
 for (const sig of process.platform === 'win32'
   ? ['SIGINT', 'SIGTERM']
   : ['SIGINT', 'SIGTERM', 'SIGHUP']) {
@@ -1788,3 +1797,61 @@ for (const sig of process.platform === 'win32'
     }
   });
 }
+
+// ── Detached IPC mode ──────────────────────────────────────────────────────
+// When PI_HOST_IPC_ENDPOINT is set, serve the {k,d} protocol over a local IPC
+// endpoint (Unix domain socket / Windows named pipe) instead of stdio, keep a
+// bounded per-session replay ring buffer, and self-exit only when there has
+// been no attached client for PI_HOST_IDLE_MS AND no session has an active turn.
+// Wrapped in an async IIFE so the host-shutdown unit test (which runs the
+// tail of this file in a VM that has no `import` and a mock `process`) parses
+// and executes it harmlessly: the guard short-circuits before any await.
+void (async () => {
+  if (!process.env?.PI_HOST_IPC_ENDPOINT) return;
+  const {
+    createRingBuffer,
+    createTurnTracker,
+    createIdleManager,
+    createIpcServer,
+    readTokenFromEnv,
+  } = await import('./detached-ipc.mjs');
+  const ringBuffer = createRingBuffer({
+    maxBytes: Number(process.env.PI_HOST_REPLAY_MAX_BYTES) || 4 * 1024 * 1024,
+    maxCount: Number(process.env.PI_HOST_REPLAY_MAX_COUNT) || 2000,
+  });
+  const turns = createTurnTracker();
+  let ipcServer;
+  const idle = createIdleManager({
+    idleMs: Number(process.env.PI_HOST_IDLE_MS) || 10 * 60 * 1000,
+    hasActiveTurn: () => turns.hasActive(),
+    onIdle: () => void shutdownHost(0, 'idle-exit'),
+  });
+  // Every outbound frame is recorded for replay and routed to the controlling
+  // client (if any). A detached client never loses events: they stay buffered.
+  outboundSink = (k, obj) => {
+    turns.observe(k, obj);
+    const seq = ringBuffer.push(k, serializeJsonLine({ k, d: obj }));
+    ipcServer?.emit(k, { k, d: obj }, seq);
+    if (obj && obj.type === 'agent_settled') idle.turnSettled();
+    if (obj && obj.type === 'session_closed') {
+      ringBuffer.drop(k);
+      turns.clear(k);
+    }
+  };
+  ipcServer = createIpcServer({
+    endpoint: process.env.PI_HOST_IPC_ENDPOINT,
+    readToken: () => readTokenFromEnv(process.env),
+    onInbound: handleInboundEnvelope,
+    replayFor: (k, ack) => ringBuffer.since(k, ack),
+    onClientAttached: () => idle.clientAttached(),
+    onClientDetached: () => idle.clientDetached(),
+  });
+  try {
+    await ipcServer.listen();
+    process.stderr.write(`pi-host IPC listening on ${process.env.PI_HOST_IPC_ENDPOINT}\n`);
+  } catch (err) {
+    process.stderr.write(`pi-host IPC listen failed: ${(err && err.message) || err}\n`);
+    process.exit(1);
+  }
+  idle.start();
+})();

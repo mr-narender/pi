@@ -356,6 +356,11 @@
         "category": "Pi"
       },
       {
+        "command": "piRpc.stopBackgroundRuntimes",
+        "title": "Stop Background Runtimes",
+        "category": "Pi"
+      },
+      {
         "command": "piRpc.showAllChatsUsage",
         "title": "Show Usage for All Open Chats",
         "category": "Pi"
@@ -596,6 +601,16 @@
           "type": "number",
           "default": 15,
           "description": "Free a hidden chat's session after this many idle minutes (0 = never). The tab and transcript stay; the session restarts instantly when you focus the tab. Busy chats and chats waiting for approval are never touched."
+        },
+        "piRpc.detachedRuntime.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run the Pi runtime DETACHED from the VS Code window (its own process group, served over a local Unix socket / Windows named pipe) so an in-flight turn keeps running when you reload or close the window, and the next window re-attaches to the same sessions. Default off (opt-in); falls back to the in-window runtime if the IPC endpoint can't be created. No network ports are opened; a per-runtime 256-bit token (0600 file) gates every connection."
+        },
+        "piRpc.detachedRuntime.idleMinutes": {
+          "type": "number",
+          "default": 10,
+          "description": "A detached runtime exits on its own after this many minutes with no attached window AND no active turn. An active turn always keeps it alive until the turn settles."
         },
         "piRpc.turnReview": {
           "type": "boolean",

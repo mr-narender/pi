@@ -901,6 +901,7 @@ export async function nativeSdkHostPlan(
     const assets = state.hostAssets ?? new Map<string, Buffer>();
     for (const name of [
       'pi-multi-host.mjs',
+      'detached-ipc.mjs',
       'llama-builtin.mjs',
       'scoped-models.mjs',
       'startup-adapter.mjs',
