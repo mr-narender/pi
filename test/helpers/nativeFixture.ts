@@ -86,7 +86,7 @@ export interface NativeFixture {
   readonly port: number;
   readonly requests: number;
   readonly summaryRequests: readonly unknown[];
-  setSummaryOutcome(outcome: 'success' | 'failure' | 'hold' | 'tool'): void;
+  setSummaryOutcome(outcome: 'success' | 'failure' | 'hold' | 'stream-hold' | 'tool'): void;
   readonly nodeArgs: readonly string[];
   readonly env: Readonly<NodeJS.ProcessEnv>;
   resetRequests(): void;
@@ -400,7 +400,7 @@ export async function createNativeFixture(
   await writeFile(networkLog, '');
   let requests = 0;
   const summaryRequests: unknown[] = [];
-  let summaryOutcome: 'success' | 'failure' | 'hold' | 'tool' = 'success';
+  let summaryOutcome: 'success' | 'failure' | 'hold' | 'stream-hold' | 'tool' = 'success';
   const server = createServer((req, res) => {
     requests++;
     if (profile === 'mcp-status') {
@@ -497,6 +497,12 @@ export async function createNativeFixture(
           model: 'ping',
           choices: [{ index: 0, delta, finish_reason }],
         });
+        if (summaryOutcome === 'stream-hold') {
+          res.write(
+            `data: ${JSON.stringify(chunk({ role: 'assistant', content: 'OWNED PARTIAL REPLY' }))}\n\n`
+          );
+          return;
+        }
         if (
           profile === 'ide-tools' &&
           !payload.messages.some((message: any) => message.role === 'tool')
@@ -795,7 +801,8 @@ export async function createNativeFixture(
       setSummaryOutcome(outcome) {
         if (
           !(
-            (profile === 'compact' && ['success', 'failure', 'hold', 'tool'].includes(outcome)) ||
+            (profile === 'compact' &&
+              ['success', 'failure', 'hold', 'stream-hold', 'tool'].includes(outcome)) ||
             (profile === 'model-tools' && ['success', 'hold'].includes(outcome))
           )
         )

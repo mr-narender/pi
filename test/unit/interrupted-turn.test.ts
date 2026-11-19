@@ -160,3 +160,64 @@ test('last assistant without stopReason remains interrupted even after tool resu
     'incompleteReply'
   );
 });
+
+for (const stopReason of ['aborted', 'stop']) {
+  test(`shutdown marker only recovers an aborted reply (${stopReason})`, () => {
+    const user = { role: 'user', content: 'Continue' };
+    const assistant = { role: 'assistant', content: 'Partial', stopReason };
+    const entries = [
+      { type: 'message', id: 'u', parentId: null, message: user },
+      { type: 'message', id: 'a', parentId: 'u', message: assistant },
+      {
+        type: 'custom',
+        id: 'm',
+        parentId: 'a',
+        customType: 'vscode-pi.turn-interrupted',
+        data: { reason: 'stdin-closed', at: '2026-01-01T00:00:00Z' },
+      },
+    ];
+    const messages = [user, assistant];
+    assert.equal(detectInterruptedTurn(messages, 'ready', false), undefined);
+    const result = detectInterruptedTurn(messages, 'ready', false, entries, 'm');
+    assert.equal(result?.kind, stopReason === 'aborted' ? 'incompleteReply' : undefined);
+    if (stopReason === 'aborted') {
+      assert.equal(result?.lastUserMessage, 'Continue');
+      assert.equal(result?.canResend, true);
+    }
+    assert.equal(detectInterruptedTurn(messages, 'ready', false, entries, 'a'), undefined);
+    assert.equal(detectInterruptedTurn(messages, 'ready', true, entries, 'm'), undefined);
+    assert.equal(
+      detectInterruptedTurn(
+        [user, { ...assistant, content: 'Different turn' }],
+        'ready',
+        false,
+        entries,
+        'm'
+      ),
+      undefined
+    );
+  });
+}
+
+test('shutdown marker after a user with no reply preserves noReply recovery', () => {
+  const user = { role: 'user', content: 'Continue' };
+  assert.equal(
+    detectInterruptedTurn(
+      [user],
+      'ready',
+      false,
+      [
+        { type: 'message', id: 'u', parentId: null, message: user },
+        {
+          type: 'custom',
+          id: 'm',
+          parentId: 'u',
+          customType: 'vscode-pi.turn-interrupted',
+          data: { reason: 'signal' },
+        },
+      ],
+      'm'
+    )?.kind,
+    'noReply'
+  );
+});

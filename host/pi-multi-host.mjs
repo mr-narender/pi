@@ -198,6 +198,8 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     throw failure;
   };
   let activityRevision = 0;
+  let unsettledTurn = false;
+  let explicitlyAborted = false;
   const widgets = new Set();
   const assertEngineIdle = () => {
     if (recoveryRequired) throw new Error('ENGINE_RECOVERY_REQUIRED');
@@ -607,9 +609,14 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     unsubscribe?.();
     unsubscribeBackpressure?.();
     unsubscribe = session.subscribe((event) => {
-      if (event.type === 'agent_start') activityRevision++;
+      if (event.type === 'agent_start') {
+        activityRevision++;
+        unsettledTurn = true;
+        explicitlyAborted = false;
+      }
       output(toJsonEvent(event));
       if (event.type === 'agent_settled') {
+        unsettledTurn = false;
         void checkShutdownRequested();
       }
     });
@@ -807,7 +814,36 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
       if (replacing) lifecyclePending = false;
     }
   };
+  const shutdownInterruptionEntries = () => {
+    const branch = session.sessionManager.getBranch();
+    let start = branch.length - 1;
+    while (start >= 0) {
+      const entry = branch[start];
+      if (entry.type === 'message' && ['user', 'assistant'].includes(entry.message.role)) break;
+      start--;
+    }
+    const tail = branch.slice(Math.max(0, start));
+    return tail.some(
+      (entry) => entry.type === 'custom' && entry.customType === 'vscode-pi.turn-interrupted'
+    )
+      ? tail.map((entry) =>
+          entry.type === 'message'
+            ? {
+                type: entry.type,
+                id: entry.id,
+                parentId: entry.parentId,
+                message: {
+                  role: entry.message.role,
+                  timestamp: entry.message.timestamp,
+                  stopReason: entry.message.stopReason,
+                },
+              }
+            : entry
+        )
+      : [];
+  };
   const readState = () => ({
+    shutdownInterruptionEntries: shutdownInterruptionEntries(),
     sdkVersion: metadata.version,
     model: modelDto(session.model),
     thinkingLevel: session.thinkingLevel,
@@ -908,6 +944,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
         );
       }
       case 'abort': {
+        explicitlyAborted = true;
         cancelPendingDialogs('aborted');
         await session.abort();
         return success(id, 'abort');
@@ -1447,10 +1484,20 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
    */
   // Per-session teardown (was process-wide shutdown). NO process.exit here:
   // one session closing must not kill the shared host / other sessions.
-  async function dispose() {
+  async function dispose(reason = 'host-shutdown') {
     if (shuttingDown) return;
     shuttingDown = true;
+    const interrupted = unsettledTurn && !explicitlyAborted;
     cancelPendingDialogs('closed');
+    if (interrupted) {
+      // abort() waits for the assistant entry to persist. appendCustomEntry uses
+      // synchronous JSONL writes in both supported SDKs and never enters LLM context.
+      await session.abort();
+      session.sessionManager.appendCustomEntry('vscode-pi.turn-interrupted', {
+        reason,
+        at: new Date().toISOString(),
+      });
+    }
     authCommands.dispose();
     await importCommands.discard();
     unsubscribe?.();
@@ -1555,6 +1602,7 @@ const hostEmit = (k, obj) => {
 
 const sessions = new Map();
 const openingSessions = new Map();
+const closingSessions = new Map();
 let dedicatedSessionKey;
 let dedicatedOpening = false;
 
@@ -1609,15 +1657,20 @@ async function openSession(k, info) {
   }
 }
 
-async function closeSession(k) {
+async function closeSession(k, reason = 'host-shutdown') {
+  if (closingSessions.has(k)) return closingSessions.get(k);
   openingSessions.delete(k);
   const runner = sessions.get(k);
   if (!runner) return;
   sessions.delete(k);
+  const closing = runner.dispose(reason);
+  closingSessions.set(k, closing);
   try {
-    await runner.dispose();
+    await closing;
   } catch {
     /* ignore */
+  } finally {
+    closingSessions.delete(k);
   }
 }
 
@@ -1661,11 +1714,15 @@ attachJsonlLineReader(process.stdin, (line) => {
 
 let hostShuttingDown = false;
 let hostSignalCount = 0;
-async function shutdownHost(code) {
+async function shutdownHost(code, reason) {
   if (hostShuttingDown) return;
   hostShuttingDown = true;
-  for (const k of new Set([...sessions.keys(), ...openingSessions.keys()])) {
-    await closeSession(k);
+  for (const k of new Set([
+    ...sessions.keys(),
+    ...openingSessions.keys(),
+    ...closingSessions.keys(),
+  ])) {
+    await closeSession(k, reason);
   }
   try {
     await flushRawStdout();
@@ -1674,7 +1731,7 @@ async function shutdownHost(code) {
   }
   process.exit(code);
 }
-process.stdin.on('end', () => void shutdownHost(0));
+process.stdin.on('end', () => void shutdownHost(0, 'stdin-closed'));
 for (const sig of process.platform === 'win32'
   ? ['SIGINT', 'SIGTERM']
   : ['SIGINT', 'SIGTERM', 'SIGHUP']) {
@@ -1682,7 +1739,7 @@ for (const sig of process.platform === 'win32'
     hostSignalCount++;
     const code = sig === 'SIGHUP' ? 129 : sig === 'SIGINT' ? 130 : 143;
     if (!hostShuttingDown) {
-      void shutdownHost(code);
+      void shutdownHost(code, 'signal');
     } else if (hostSignalCount > 1) {
       // stdin may close together with the first signal; only a repeat skips cleanup.
       process.exit(code);

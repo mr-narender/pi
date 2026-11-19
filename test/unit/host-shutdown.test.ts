@@ -144,6 +144,7 @@ for (const stdinFirst of [false, true]) {
       },
       sessions: new Map([['owned', {}]]),
       openingSessions: new Map(),
+      closingSessions: new Map(),
       closeSession: async () => {
         closes++;
         await disposed.promise;

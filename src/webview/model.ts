@@ -684,7 +684,11 @@ export function createWebviewSnapshot(
     interruptedTurn: detectInterruptedTurn(
       state.messages,
       state.connectionState,
-      state.state.isStreaming === true
+      state.state.isStreaming === true,
+      Array.isArray(state.state.shutdownInterruptionEntries)
+        ? (state.state.shutdownInterruptionEntries as JsonObject[])
+        : state.entries,
+      state.leafId
     ),
     isTrusted: extra.isTrusted,
     folders: extra.folders,
@@ -706,7 +710,9 @@ export function createWebviewSnapshot(
 export function detectInterruptedTurn(
   messages: readonly JsonObject[],
   connectionState: ControllerState['connectionState'],
-  isStreaming: boolean
+  isStreaming: boolean,
+  entries: readonly JsonObject[] = [],
+  leafId?: string | null
 ): WebviewSnapshot['interruptedTurn'] {
   // Only detect when idle (not actively streaming or connecting).
   if (isStreaming || connectionState !== 'ready') return undefined;
@@ -780,7 +786,11 @@ export function detectInterruptedTurn(
           (typeof block.id !== 'string' || !resultIds.has(block.id))
       )
   );
-  if ((assistant && !assistant.stopReason) || unmatchedCalls) {
+  if (
+    (assistant && !assistant.stopReason) ||
+    unmatchedCalls ||
+    (assistant?.stopReason === 'aborted' && hasShutdownMarker(entries, leafId, assistant))
+  ) {
     // Find the user message that triggered this turn.
     for (let i = messages.length - 2; i >= 0; i--) {
       if (messages[i]?.role === 'user') {
@@ -794,6 +804,54 @@ export function detectInterruptedTurn(
     return { kind: 'incompleteReply' };
   }
   return undefined;
+}
+
+/** Custom entries are metadata, not transcript messages; inspect only the active path. */
+function hasShutdownMarker(
+  entries: readonly JsonObject[],
+  leafId: string | null | undefined,
+  assistant: JsonObject
+): boolean {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  let cursor = leafId === undefined ? entries.at(-1)?.id : leafId;
+  const seen = new Set();
+  let marked = false;
+  while (typeof cursor === 'string' && !seen.has(cursor)) {
+    seen.add(cursor);
+    const entry = byId.get(cursor);
+    if (!entry) return false;
+    if (entry.type === 'custom' && entry.customType === 'vscode-pi.turn-interrupted') {
+      const data = entry.data;
+      if (
+        data &&
+        typeof data === 'object' &&
+        !Array.isArray(data) &&
+        ['host-shutdown', 'signal', 'stdin-closed'].includes(String(data.reason))
+      )
+        marked = true;
+    }
+    if (entry.type === 'message') {
+      const message = entry.message;
+      if (
+        message &&
+        typeof message === 'object' &&
+        !Array.isArray(message) &&
+        (message.role === 'assistant' || message.role === 'user')
+      ) {
+        // Entries can lag live messages; never apply an older turn's marker.
+        return (
+          marked &&
+          ((message.timestamp !== undefined &&
+            message.timestamp === assistant.timestamp &&
+            message.role === assistant.role &&
+            message.stopReason === assistant.stopReason) ||
+            JSON.stringify(message) === JSON.stringify(assistant))
+        );
+      }
+    }
+    cursor = entry.parentId;
+  }
+  return false;
 }
 
 /** Report each response's own checklist without inferring task execution. */
