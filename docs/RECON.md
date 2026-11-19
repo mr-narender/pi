@@ -5,7 +5,7 @@
 - Repository baseline: `.gitignore` plus `docs/issues/LOCAL-001.md`; no extension implementation, package manifest, tests, or build configuration.
 - Installed Pi: `@earendil-works/pi-coding-agent` **0.80.10**, Node requirement `>=22.19.0`, MIT license.
 - Required integration boundary: a child process running `pi --mode rpc`; do not replace this with ACP or the in-process SDK, because direct RPC preserves Pi extension commands and the extension UI sub-protocol.
-- `pi-agent-workflow` is not installed or published in this environment, but source is available from the existing agent-registry checkout via remote-tracking branch `origin/feat/pi-agent-workflow` and subtree `pi-agent-workflow/`. Compatibility evidence should use a deterministic temporary `git archive` extraction from that branch into an isolated temp directory; product code and checked-in settings must not hard-code `/Users/narender/dev/agent-registry`. If a target environment lacks that remote branch, final package-compatibility acceptance remains explicitly blocked.
+- `pi-agent-workflow` is not installed or published in this environment, but source is available from the existing agent-registry checkout via remote-tracking branch `origin/feat/pi-agent-workflow` and subtree `pi-agent-workflow/`. Compatibility evidence should use a deterministic temporary `git archive` extraction from that branch into an isolated temp directory; product code and checked-in settings must not hard-code `/Users/narender/Developer/agent-registry`. If a target environment lacks that remote branch, final package-compatibility acceptance remains explicitly blocked.
 
 ## Sources read completely
 
