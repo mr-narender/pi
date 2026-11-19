@@ -200,6 +200,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
   let activityRevision = 0;
   let unsettledTurn = false;
   let explicitlyAborted = false;
+  const SHUTDOWN_ABORT_TIMEOUT_MS = 2000; // Bound abort so the interruption marker is written promptly.
   const widgets = new Set();
   const assertEngineIdle = () => {
     if (recoveryRequired) throw new Error('ENGINE_RECOVERY_REQUIRED');
@@ -814,8 +815,15 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
       if (replacing) lifecyclePending = false;
     }
   };
+  let interruptionCacheManager;
+  let interruptionCacheLeaf;
+  let interruptionCacheEntries = [];
   const shutdownInterruptionEntries = () => {
-    const branch = session.sessionManager.getBranch();
+    const manager = session.sessionManager;
+    const leaf = manager.getLeafId();
+    if (manager === interruptionCacheManager && leaf === interruptionCacheLeaf)
+      return interruptionCacheEntries;
+    const branch = manager.getBranch();
     let start = branch.length - 1;
     while (start >= 0) {
       const entry = branch[start];
@@ -823,7 +831,9 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
       start--;
     }
     const tail = branch.slice(Math.max(0, start));
-    return tail.some(
+    interruptionCacheManager = manager;
+    interruptionCacheLeaf = leaf;
+    interruptionCacheEntries = tail.some(
       (entry) => entry.type === 'custom' && entry.customType === 'vscode-pi.turn-interrupted'
     )
       ? tail.map((entry) =>
@@ -841,6 +851,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
             : entry
         )
       : [];
+    return interruptionCacheEntries;
   };
   const readState = () => ({
     shutdownInterruptionEntries: shutdownInterruptionEntries(),
@@ -1492,7 +1503,20 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     if (interrupted) {
       // abort() waits for the assistant entry to persist. appendCustomEntry uses
       // synchronous JSONL writes in both supported SDKs and never enters LLM context.
-      await session.abort();
+      let abortTimer;
+      try {
+        const completed = await Promise.race([
+          session.abort().then(() => true),
+          new Promise((resolve) => {
+            abortTimer = setTimeout(() => resolve(false), SHUTDOWN_ABORT_TIMEOUT_MS);
+          }),
+        ]);
+        if (!completed) console.error('pi host: session abort timed out during shutdown');
+      } catch {
+        console.error('pi host: session abort failed during shutdown');
+      } finally {
+        clearTimeout(abortTimer);
+      }
       session.sessionManager.appendCustomEntry('vscode-pi.turn-interrupted', {
         reason,
         at: new Date().toISOString(),
@@ -1714,21 +1738,30 @@ attachJsonlLineReader(process.stdin, (line) => {
 
 let hostShuttingDown = false;
 let hostSignalCount = 0;
+const HOST_SHUTDOWN_DEADLINE_MS = 10000; // Leave room for SDK disposal to settle credential writes.
+const EOF_SIGNAL_DEADLINE_MS = 3000;
+let hostDeadlineTimer;
+let hostShutdownCode;
+let hostShutdownReason;
+let hostShutdownStartedAt;
 async function shutdownHost(code, reason) {
   if (hostShuttingDown) return;
   hostShuttingDown = true;
-  for (const k of new Set([
-    ...sessions.keys(),
-    ...openingSessions.keys(),
-    ...closingSessions.keys(),
-  ])) {
-    await closeSession(k, reason);
-  }
+  hostShutdownCode = code;
+  hostShutdownReason = reason;
+  hostShutdownStartedAt = Date.now();
+  hostDeadlineTimer = setTimeout(() => process.exit(code), HOST_SHUTDOWN_DEADLINE_MS);
+  await Promise.allSettled(
+    [...new Set([...sessions.keys(), ...openingSessions.keys(), ...closingSessions.keys()])].map(
+      (k) => closeSession(k, reason)
+    )
+  );
   try {
     await flushRawStdout();
   } catch {
     /* ignore */
   }
+  clearTimeout(hostDeadlineTimer);
   process.exit(code);
 }
 process.stdin.on('end', () => void shutdownHost(0, 'stdin-closed'));
@@ -1741,8 +1774,17 @@ for (const sig of process.platform === 'win32'
     if (!hostShuttingDown) {
       void shutdownHost(code, 'signal');
     } else if (hostSignalCount > 1) {
-      // stdin may close together with the first signal; only a repeat skips cleanup.
       process.exit(code);
+    } else if (hostShutdownReason === 'stdin-closed') {
+      // An EOF shutdown already started; the first signal accelerates its deadline.
+      clearTimeout(hostDeadlineTimer);
+      hostDeadlineTimer = setTimeout(
+        () => process.exit(hostShutdownCode),
+        Math.min(
+          EOF_SIGNAL_DEADLINE_MS,
+          Math.max(0, HOST_SHUTDOWN_DEADLINE_MS - (Date.now() - hostShutdownStartedAt))
+        )
+      );
     }
   });
 }
