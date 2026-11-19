@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { isBlockingExtensionUi } from './rpc/protocol';
 import { setIdeExtensionPath } from './ide/query';
+import { deleteSessionFileIfExists } from './sessions/deleteSessionFile';
 import { showChatSession } from './commands/sessionCommand';
 import { exportCommand } from './commands/exportCommand';
 import { compactMenu } from './commands/compactCommand';
@@ -676,7 +677,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // One click = deleted. No confirmation by design (Master's call).
     await chatTabs.closeForSessionFile(sessionPath);
     chatTabs.stopControllersForSessionFile(sessionPath);
-    await vscode.workspace.fs.delete(vscode.Uri.file(sessionPath));
+    await deleteSessionFileIfExists(sessionPath);
     recentSessions.removePath(sessionPath);
     // The full sessions-dir rescan is the slow part — never block the UI on it.
     void recentSessions.refresh().then(() => refreshViews());

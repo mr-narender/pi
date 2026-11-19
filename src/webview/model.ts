@@ -681,15 +681,7 @@ export function createWebviewSnapshot(
     preview: extra.composer.preview,
     acceptedSendSnapshot: extra.composer.acceptedSendSnapshot,
     recovery: extra.composer.recovery,
-    interruptedTurn: detectInterruptedTurn(
-      state.messages,
-      state.connectionState,
-      state.state.isStreaming === true,
-      Array.isArray(state.state.shutdownInterruptionEntries)
-        ? (state.state.shutdownInterruptionEntries as JsonObject[])
-        : state.entries,
-      state.leafId
-    ),
+    interruptedTurn: detectInterruptedControllerTurn(state),
     isTrusted: extra.isTrusted,
     folders: extra.folders,
     workingAnimation: extra.presentation?.workingAnimation,
@@ -707,6 +699,18 @@ export function createWebviewSnapshot(
  * with no assistant reply, or the turn ends before a final assistant answer.
  * Exported for unit tests.
  */
+export function detectInterruptedControllerTurn(state: ControllerState) {
+  return detectInterruptedTurn(
+    state.messages,
+    state.connectionState,
+    state.state.isStreaming === true,
+    Array.isArray(state.state.shutdownInterruptionEntries)
+      ? (state.state.shutdownInterruptionEntries as JsonObject[])
+      : state.entries,
+    state.leafId
+  );
+}
+
 export function detectInterruptedTurn(
   messages: readonly JsonObject[],
   connectionState: ControllerState['connectionState'],

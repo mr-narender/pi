@@ -40,6 +40,7 @@ import { modelToolsSnapshot } from '../modelTools/snapshot';
 import {
   isManualModeRequested,
   assertManualModeExtensionsEnabled,
+  assertApprovalGateActive,
   prepareApprovalGateForFolder,
   waitForApprovalGateSync,
 } from '../review/approvalGate';
@@ -1488,8 +1489,11 @@ export class SessionController implements vscode.Disposable {
       assertManualModeExtensionsEnabled(['--no-extensions'], true);
   }
 
-  private assertManualModeRuntime(): void {
-    if (isManualModeRequested()) this.assertManualModeAvailable();
+  private async assertManualModeRuntime(): Promise<void> {
+    if (!isManualModeRequested()) return;
+    this.assertManualModeAvailable();
+    const result = await this.requireClient().getCommands();
+    assertApprovalGateActive(result?.commands);
   }
 
   public async prompt(
@@ -1529,7 +1533,7 @@ export class SessionController implements vscode.Disposable {
     const dispatch = { attempted: false, valid };
     try {
       await waitForApprovalGateSync();
-      this.assertManualModeRuntime();
+      await this.assertManualModeRuntime();
       if (!valid()) throw new Error('The originating chat changed.');
       if (options?.outbox) {
         if (
@@ -1594,7 +1598,7 @@ export class SessionController implements vscode.Disposable {
     this.fire();
     try {
       await waitForApprovalGateSync();
-      this.assertManualModeRuntime();
+      await this.assertManualModeRuntime();
       if (!dispatch.valid()) throw new Error('The originating chat changed.');
       this.assertNoManualCompaction();
       // Native prompt() chooses idle/steer/queue atomically; handled prompts

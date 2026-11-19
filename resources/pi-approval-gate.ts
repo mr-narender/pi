@@ -10,12 +10,19 @@
  * not tool actions and are not approval gated.
  */
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
-const modeFile = new URL('../pi-vscode-manual-mode.json', import.meta.url);
+// Project and explicitly loaded packaged copies share ownership by session, never
+// by process: a shared host can run independently gated sessions concurrently.
+const ownershipKey = Symbol.for('pi-vscode.approval-gate.sessions.v1');
+const shared = globalThis as typeof globalThis & { [ownershipKey]?: WeakMap<object, object> };
+const owners = (shared[ownershipKey] ??= new WeakMap<object, object>());
 
-async function manualMode(): Promise<boolean> {
-  const mode = JSON.parse(await readFile(modeFile, 'utf8')) as { enabled?: unknown };
+async function manualMode(cwd: string): Promise<boolean> {
+  const mode = JSON.parse(await readFile(join(cwd, '.pi/pi-vscode-manual-mode.json'), 'utf8')) as {
+    enabled?: unknown;
+  };
   if (typeof mode.enabled !== 'boolean') {
     throw new Error('Manual Mode setting is invalid.');
   }
@@ -28,9 +35,21 @@ function preview(input: Record<string, unknown>): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  const owner = {};
+  const projectCopy = /[/\\]\.pi[/\\]extensions[/\\]/.test(new URL(import.meta.url).pathname);
+  pi.registerCommand(projectCopy ? 'pi-project-approval-gate' : 'pi-vscode-approval-gate', {
+    description: 'Manual Mode approval gate is active',
+    handler: async () => undefined,
+  });
+  pi.on('session_shutdown', async (_event, ctx) => {
+    if (owners.get(ctx.sessionManager) === owner) owners.delete(ctx.sessionManager);
+  });
   pi.on('tool_call', async (event, ctx) => {
+    const session = ctx.sessionManager;
+    if (!owners.has(session)) owners.set(session, owner);
+    if (owners.get(session) !== owner) return undefined;
     try {
-      if (!(await manualMode())) {
+      if (!(await manualMode(ctx.cwd))) {
         return undefined;
       }
     } catch {

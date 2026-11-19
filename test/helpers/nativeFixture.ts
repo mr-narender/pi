@@ -86,7 +86,9 @@ export interface NativeFixture {
   readonly port: number;
   readonly requests: number;
   readonly summaryRequests: readonly unknown[];
-  setSummaryOutcome(outcome: 'success' | 'failure' | 'hold' | 'stream-hold' | 'tool'): void;
+  setSummaryOutcome(
+    outcome: 'success' | 'failure' | 'hold' | 'stream-hold' | 'tool' | 'edit'
+  ): void;
   readonly nodeArgs: readonly string[];
   readonly env: Readonly<NodeJS.ProcessEnv>;
   resetRequests(): void;
@@ -273,6 +275,7 @@ interface OwnedState {
   readonly ideAssets?: readonly string[];
   readonly modelToolsAsset?: string;
   readonly extensionUiAsset?: string;
+  approvalGateAsset?: string;
   root: string;
   cwd: string;
   dev: number;
@@ -400,7 +403,7 @@ export async function createNativeFixture(
   await writeFile(networkLog, '');
   let requests = 0;
   const summaryRequests: unknown[] = [];
-  let summaryOutcome: 'success' | 'failure' | 'hold' | 'stream-hold' | 'tool' = 'success';
+  let summaryOutcome: 'success' | 'failure' | 'hold' | 'stream-hold' | 'tool' | 'edit' = 'success';
   const server = createServer((req, res) => {
     requests++;
     if (profile === 'mcp-status') {
@@ -526,11 +529,11 @@ export async function createNativeFixture(
           return;
         }
         if (
-          summaryOutcome === 'tool' &&
+          ['tool', 'edit'].includes(summaryOutcome) &&
           !payload.messages.some((message: any) => message.role === 'tool')
         ) {
           res.write(
-            `data: ${JSON.stringify(chunk({ role: 'assistant', tool_calls: [{ index: 0, id: 'owned_ls', type: 'function', function: { name: 'ls', arguments: '{"path":"."}' } }] }))}\n\n`
+            `data: ${JSON.stringify(chunk({ role: 'assistant', tool_calls: [{ index: 0, id: 'owned_ls', type: 'function', function: summaryOutcome === 'edit' ? { name: 'edit', arguments: JSON.stringify({ path: 'owned-edit.txt', oldText: 'ORIGINAL', newText: 'UPDATED' }) } : { name: 'ls', arguments: '{"path":"."}' } }] }))}\n\n`
           );
           res.write(`data: ${JSON.stringify(chunk({}, 'tool_calls'))}\n\n`);
           res.end('data: [DONE]\n\n');
@@ -802,7 +805,7 @@ export async function createNativeFixture(
         if (
           !(
             (profile === 'compact' &&
-              ['success', 'failure', 'hold', 'stream-hold', 'tool'].includes(outcome)) ||
+              ['success', 'failure', 'hold', 'stream-hold', 'tool', 'edit'].includes(outcome)) ||
             (profile === 'model-tools' && ['success', 'hold'].includes(outcome))
           )
         )
@@ -917,6 +920,7 @@ export async function nativeSdkHostPlan(
       // Fixed veto profile only: no filesystem permission widening.
       const bytes =
         (state.selectedSdk ||
+          state.approvalGateAsset ||
           [
             'compact-veto',
             'lifecycle-veto',
@@ -967,27 +971,32 @@ export async function nativeSdkHostPlan(
     ...(state.profile !== 'openrouter' || scenario === 'openrouter-offline' ? ['--offline'] : []),
     scenario === 'project' ? '--approve' : '--no-approve',
     '--no-session',
-    ...(['mcp-status', 'mcp-status-empty'].includes(state.profile) ? [] : ['--no-extensions']),
+    ...(['mcp-status', 'mcp-status-empty'].includes(state.profile) || state.approvalGateAsset
+      ? []
+      : ['--no-extensions']),
     '--no-skills',
     '--no-prompt-templates',
     '--no-context-files',
     ...(loadoutSelections[scenario] ??
-      (state.profile === 'model-tools'
-        ? scenario === 'model-tools-filtered'
-          ? [
-              '--tools',
-              'owned_direct,owned_model_only,owned_deferred,owned_codemode,owned_hidden,owned_excluded',
-              '--exclude-tools',
-              'owned_excluded',
-            ]
-          : ['--exclude-tools', 'owned_excluded']
-        : state.profile === 'ide-tools'
-          ? [
-              '--tools',
-              'vscode_diagnostics,vscode_document_symbols,vscode_definitions,vscode_references',
-            ]
-          : ['--no-tools'])),
+      (state.approvalGateAsset
+        ? ['--tools', 'edit']
+        : state.profile === 'model-tools'
+          ? scenario === 'model-tools-filtered'
+            ? [
+                '--tools',
+                'owned_direct,owned_model_only,owned_deferred,owned_codemode,owned_hidden,owned_excluded',
+                '--exclude-tools',
+                'owned_excluded',
+              ]
+            : ['--exclude-tools', 'owned_excluded']
+          : state.profile === 'ide-tools'
+            ? [
+                '--tools',
+                'vscode_diagnostics,vscode_document_symbols,vscode_definitions,vscode_references',
+              ]
+            : ['--no-tools'])),
   ];
+  if (state.approvalGateAsset) openArgs.push('--extension', state.approvalGateAsset);
   if (state.vetoAsset) openArgs.push('--extension', state.vetoAsset);
   for (const asset of state.ideAssets ?? []) openArgs.push('--extension', asset);
   if (state.modelToolsAsset) openArgs.push('--extension', state.modelToolsAsset);
@@ -1118,20 +1127,46 @@ export async function nativeSpawnPlan(fixture: NativeFixture, extraArgs: string[
       '--offline',
       '--no-approve',
       '--no-session',
-      ...(['mcp-status', 'mcp-status-empty'].includes(state.profile) ? [] : ['--no-extensions']),
+      ...(['mcp-status', 'mcp-status-empty'].includes(state.profile) || state.approvalGateAsset
+        ? []
+        : ['--no-extensions']),
       '--no-skills',
       '--no-prompt-templates',
       '--no-context-files',
-      ...(state.profile === 'ide-tools'
-        ? [
-            '--tools',
-            'vscode_diagnostics,vscode_document_symbols,vscode_definitions,vscode_references',
-          ]
-        : ['--no-tools']),
+      ...(state.approvalGateAsset
+        ? ['--tools', 'edit']
+        : state.profile === 'ide-tools'
+          ? [
+              '--tools',
+              'vscode_diagnostics,vscode_document_symbols,vscode_definitions,vscode_references',
+            ]
+          : ['--no-tools']),
+      ...(state.approvalGateAsset ? ['--extension', state.approvalGateAsset] : []),
       ...(state.vetoAsset ? ['--extension', state.vetoAsset] : []),
       ...(state.ideAssets ?? []).flatMap((asset) => ['--extension', asset]),
     ],
     cwd: state.cwd,
     env: { ...state.env },
   };
+}
+
+/** Fixed repository-owned approval gate; no arbitrary fixture extension authority. */
+export async function prepareNativeApprovalGate(fixture: NativeFixture, missing = false) {
+  const state = ownedFixtures.get(fixture);
+  if (!state || state.profile !== 'compact') throw new Error('Unowned approval gate fixture');
+  await validateOwned(state);
+  const bytes = await readFile(resolve('resources/pi-approval-gate.ts'));
+  const packaged = join(state.root, 'pi-approval-gate.ts');
+  const project = join(state.cwd, '.pi/extensions/pi-approval-gate.ts');
+  await mkdir(join(state.cwd, '.pi/extensions'), { recursive: true });
+  await writeFile(project, bytes);
+  await writeFile(packaged, bytes);
+  state.hostAssets ??= new Map();
+  state.hostAssets.set(project, bytes);
+  state.hostAssets.set(packaged, bytes);
+  state.requiredPaths.push(project, packaged);
+  state.approvalGateAsset = missing ? join(state.root, 'missing-gate.ts') : packaged;
+  await writeFile(join(state.cwd, '.pi/pi-vscode-manual-mode.json'), '{"enabled":true}');
+  await writeFile(join(state.cwd, 'owned-edit.txt'), 'ORIGINAL');
+  fixture.setSummaryOutcome('edit');
 }

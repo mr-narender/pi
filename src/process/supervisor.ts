@@ -21,6 +21,7 @@ import { RpcClient } from '../rpc/client';
 import { RpcTransport } from '../rpc/transport';
 import { checkPiVersion } from './version';
 import { getIdeExtensionPath } from '../ide/query';
+import { getApprovalGateExtensionPath } from '../review/approvalGate';
 
 export interface SupervisorEvents {
   exit: [number | null, NodeJS.Signals | null];
@@ -354,6 +355,15 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
       ideExtension
     ) {
       args.push('--extension', ideExtension);
+    }
+    const approvalGate = getApprovalGateExtensionPath();
+    if (
+      vscode.workspace.isTrusted &&
+      !options?.noExtensions &&
+      !excludesExtensions &&
+      approvalGate
+    ) {
+      args.push('--extension', approvalGate);
     }
     if (existingSessionPath) {
       args.push('--session', existingSessionPath);

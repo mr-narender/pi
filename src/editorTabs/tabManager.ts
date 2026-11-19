@@ -20,7 +20,11 @@ import { ensureTrustedForMutation } from '../security/trust';
 import { SessionRegistry } from '../sessions/sessionRegistry';
 import type { SessionController } from '../sessions/sessionController';
 import type { DiagnosticsLogger } from '../diagnostics/logger';
-import { createWebviewSnapshot, detectInterruptedTurn, firstPromptPreview } from '../webview/model';
+import {
+  createWebviewSnapshot,
+  detectInterruptedControllerTurn,
+  firstPromptPreview,
+} from '../webview/model';
 import type { TurnReview } from '../review/turnReview';
 import { SessionIndex } from './sessionIndex';
 import { notifier } from '../ui/notifier';
@@ -166,6 +170,7 @@ const WEBVIEW_COMMAND_ALLOWLIST = new Set<string>([
 
 /** A native editor-tab chat host. */
 export interface ChatHost extends vscode.Disposable {
+  readonly disposed?: boolean;
   readonly resource: vscode.Uri;
   readonly panel: {
     readonly webview: vscode.Webview;
@@ -192,6 +197,7 @@ export function collectOpenableAttachmentUris(snapshot: WebviewSnapshot): Set<st
 }
 
 class ChatEditorHost implements vscode.Disposable {
+  public disposed = false;
   private readonly disposables: vscode.Disposable[] = [];
   private attachmentFileUris = new Set<string>();
 
@@ -220,7 +226,10 @@ class ChatEditorHost implements vscode.Disposable {
       this.panel.webview.onDidReceiveMessage(
         (message: unknown) => void this.manager.onMessage(this, message)
       ),
-      this.panel.onDidDispose(() => void this.manager.onHostDisposed(this)),
+      this.panel.onDidDispose(() => {
+        this.disposed = true;
+        void this.manager.onHostDisposed(this);
+      }),
       this.panel.onDidChangeViewState(
         (event) => void this.manager.onHostViewStateChanged(this, event.webviewPanel.active)
       )
@@ -236,6 +245,7 @@ class ChatEditorHost implements vscode.Disposable {
     title: string,
     unseenCompletion = false
   ): Promise<void> {
+    if (this.disposed) return;
     this.panel.title = `${unseenCompletion ? '● ' : ''}${formatTabTitle(title)}`;
     this.attachmentFileUris = collectOpenableAttachmentUris(snapshot);
     // IMPORTANT: do not await postMessage here. When this host is created from
@@ -248,6 +258,7 @@ class ChatEditorHost implements vscode.Disposable {
 
   /** Post an auxiliary (non-snapshot) message to the webview. */
   public post(message: unknown): void {
+    if (this.disposed) return;
     void this.panel.webview.postMessage(message);
   }
 
@@ -256,10 +267,12 @@ class ChatEditorHost implements vscode.Disposable {
   }
 
   public reveal(): void {
+    if (this.disposed) return;
     this.panel.reveal(this.panel.viewColumn, false);
   }
 
   public dispose(): void {
+    this.disposed = true;
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
@@ -412,7 +425,7 @@ export class ChatTabManager implements vscode.Disposable {
     }
     const cutoff = Date.now() - minutes * 60_000;
     for (const host of this.hosts.values()) {
-      if (host.panel.visible) {
+      if (!host.disposed && host.panel.visible) {
         continue;
       }
       const context = this.contextForResource(host.resource);
@@ -511,8 +524,9 @@ export class ChatTabManager implements vscode.Disposable {
     // rendered (connecting/faulted) state.
     try {
       await this.cache.markOpen(document.uri);
+      if (host.disposed) return;
       await this.renderResource(document.uri, { active: panel.active });
-      if (panel.active) {
+      if (!host.disposed && panel.active) {
         await this.activateResource(document.uri, { startIfStopped: false });
       }
     } catch (error) {
@@ -758,7 +772,7 @@ export class ChatTabManager implements vscode.Disposable {
 
   public async refreshVisibleTabs(): Promise<void> {
     for (const host of this.hosts.values()) {
-      await this.renderResource(host.resource, { active: host.panel.active });
+      if (!host.disposed) await this.renderResource(host.resource, { active: host.panel.active });
     }
   }
 
@@ -1109,39 +1123,49 @@ export class ChatTabManager implements vscode.Disposable {
     // resolve back to the raw draft key and miss the registry entry).
     const controllerKey = this.keyFor(host.resource);
     const resourceKey = host.resource.toString();
-    this.setUnseenCompletion(host.resource, false);
-    this.sessions.unbind(resourceKey);
-    if (this.hosts.get(resourceKey) === host) {
-      this.hosts.delete(resourceKey);
-      this.pendingVisibleFlush.delete(resourceKey);
-      this.openChatsEmitter.fire();
+    // Disposed panels cannot even be read. Clear bookkeeping without UI.
+    try {
+      this.unseenCompletions.delete(resourceKey);
+    } finally {
+      this.sessions.unbind(resourceKey);
+      if (this.hosts.get(resourceKey) === host) {
+        this.hosts.delete(resourceKey);
+        this.pendingVisibleFlush.delete(resourceKey);
+        this.openChatsEmitter.fire();
+      }
     }
-    await this.cache.markClosed(host.resource);
-    // Closing the tab tears down its dedicated Pi session (parallel-session
-    // model), unless another open tab still resolves to the same session key.
-    const stillOpen = [...this.hosts.values()].some(
-      (other) => this.keyFor(other.resource) === controllerKey
-    );
-    if (!stillOpen) {
-      const controller = disposedController;
-      const binding = controller && this.outboxBindings.get(controller);
-      try {
-        if (binding) {
-          if (binding.timer) clearTimeout(binding.timer);
-          this.outboxBindings.delete(controller!);
-          await this.outbox.suspend(binding.key);
+    try {
+      await this.cache.markClosed(host.resource);
+    } catch (error) {
+      this.logger.warn(`Could not persist closed chat: ${String(error)}`);
+    } finally {
+      // Closing the tab tears down its dedicated Pi session (parallel-session
+      // model), unless another open tab still resolves to the same session key.
+      const stillOpen = [...this.hosts.values()].some(
+        (other) => this.keyFor(other.resource) === controllerKey
+      );
+      if (!stillOpen) {
+        const controller = disposedController;
+        const binding = controller && this.outboxBindings.get(controller);
+        try {
+          if (binding) {
+            if (binding.timer) clearTimeout(binding.timer);
+            this.outboxBindings.delete(controller!);
+            await this.outbox.suspend(binding.key);
+          }
+        } catch {
+          this.logger.warn(
+            'Outbox could not persist its paused state while closing. Pending messages remain paused on restart.'
+          );
+        } finally {
+          this.registry.remove(controllerKey);
         }
-      } catch {
-        this.logger.warn(
-          'Outbox could not persist its paused state while closing. Pending messages remain paused on restart.'
-        );
-      } finally {
-        this.registry.remove(controllerKey);
       }
     }
   }
 
   public async onHostViewStateChanged(host: ChatHost, active: boolean): Promise<void> {
+    if (host.disposed) return;
     // Which tab is "active" (the Agentic Mode list's checkmark) can change
     // WITHOUT any host ever being added or removed — switching focus between
     // two already-open tabs doesn't re-run resolveEditor (VS Code only calls
@@ -1154,7 +1178,11 @@ export class ChatTabManager implements vscode.Disposable {
     this.openChatsEmitter.fire();
     this.clearViewedCompletions();
     // Flush a pending snapshot when a hidden tab becomes visible (Goal C).
-    if (host.panel.visible && this.pendingVisibleFlush.has(host.resource.toString())) {
+    if (
+      !host.disposed &&
+      host.panel.visible &&
+      this.pendingVisibleFlush.has(host.resource.toString())
+    ) {
       this.pendingVisibleFlush.delete(host.resource.toString());
       // Active tabs are rendered by activateResource below; don't double-post.
       if (!active) await this.renderResource(host.resource);
@@ -1524,11 +1552,7 @@ export class ChatTabManager implements vscode.Disposable {
     context: ChatTabContext
   ): Promise<void> {
     const snapshot = context.controller.snapshot;
-    const interrupted = detectInterruptedTurn(
-      snapshot.messages,
-      snapshot.connectionState,
-      snapshot.state.isStreaming === true
-    );
+    const interrupted = detectInterruptedControllerTurn(snapshot);
     const text = interrupted?.lastUserMessage;
     if (!text) return;
     const composer = await this.uiState.getComposerStateForIdentity(
@@ -2584,7 +2608,7 @@ export class ChatTabManager implements vscode.Disposable {
           typeof deltaType === 'string' &&
           deltaType.endsWith('_delta')) ||
         event?.type === 'tool_execution_update';
-      if (host && !host.panel.visible && freshEvent && streamingDelta) {
+      if (host && !host.disposed && !host.panel.visible && freshEvent && streamingDelta) {
         this.pendingVisibleFlush.add(owner.toString());
         return;
       }
@@ -2595,6 +2619,10 @@ export class ChatTabManager implements vscode.Disposable {
   private setUnseenCompletion(resource: vscode.Uri, unseen: boolean): void {
     const key = resource.toString();
     const host = this.hosts.get(key);
+    if (host?.disposed) {
+      this.unseenCompletions.delete(key);
+      return;
+    }
     if (unseen) {
       if (this.unseenCompletions.has(key) || !host) return;
       this.unseenCompletions.add(key);
@@ -2607,7 +2635,7 @@ export class ChatTabManager implements vscode.Disposable {
   private clearViewedCompletions(): void {
     if (!vscode.window.state.focused) return;
     for (const host of this.hosts.values())
-      if (host.panel.visible) this.setUnseenCompletion(host.resource, false);
+      if (!host.disposed && host.panel.visible) this.setUnseenCompletion(host.resource, false);
   }
 
   /** A quiet tab marker remains until its completed chat is visible in the focused window. */
@@ -2640,7 +2668,8 @@ export class ChatTabManager implements vscode.Disposable {
       // Watched chats stay silent while their editor tab is visible.
       const watching =
         vscode.window.state.focused &&
-        (this.getActiveContext()?.controller === controller || ownerHost?.panel.visible === true);
+        (this.getActiveContext()?.controller === controller ||
+          (ownerHost && !ownerHost.disposed && ownerHost.panel.visible === true));
       if (getSettings().turnReview) {
         void this.turnReview?.onTurnEnd(controller, { silent: watching });
       }
@@ -2649,7 +2678,7 @@ export class ChatTabManager implements vscode.Disposable {
       if (this.sessions.ownerOf(controller)) {
         const owner = this.sessions.ownerOf(controller);
         const host = owner ? this.hosts.get(owner.toString()) : undefined;
-        if (host?.panel.visible) {
+        if (host && !host.disposed && host.panel.visible) {
           void this.checkContextPressure(controller);
         }
       }
@@ -2686,7 +2715,7 @@ export class ChatTabManager implements vscode.Disposable {
   /** Open the find bar in the ACTIVE chat tab (jump-to-reference search). */
   public openFindInActiveChat(): void {
     for (const host of this.hosts.values()) {
-      if (host.panel.active) {
+      if (!host.disposed && host.panel.active) {
         void host.panel.webview.postMessage({ type: 'find' });
         return;
       }
@@ -2709,7 +2738,7 @@ export class ChatTabManager implements vscode.Disposable {
     }> = [];
     for (const host of this.hosts.values()) {
       const context = this.contextForResource(host.resource);
-      if (!context) {
+      if (!context || host.disposed) {
         continue;
       }
       const sessionName = context.controller.snapshot.state.sessionName;
@@ -2719,7 +2748,7 @@ export class ChatTabManager implements vscode.Disposable {
         resource: host.resource,
         controller: context.controller,
         title,
-        visible: host.panel.visible,
+        visible: !host.disposed && host.panel.visible,
       });
     }
     return chats;
@@ -2727,7 +2756,11 @@ export class ChatTabManager implements vscode.Disposable {
 
   public isControllerVisible(controller: SessionController): boolean {
     for (const host of this.hosts.values()) {
-      if (host.panel.visible && this.contextForResource(host.resource)?.controller === controller) {
+      if (
+        !host.disposed &&
+        host.panel.visible &&
+        this.contextForResource(host.resource)?.controller === controller
+      ) {
         return true;
       }
     }
@@ -2737,7 +2770,7 @@ export class ChatTabManager implements vscode.Disposable {
   public revealController(controller: SessionController): void {
     for (const host of this.hosts.values()) {
       if (this.contextForResource(host.resource)?.controller === controller) {
-        host.panel.reveal(undefined, false);
+        host.reveal();
         return;
       }
     }
@@ -2820,7 +2853,7 @@ export class ChatTabManager implements vscode.Disposable {
     snapshot.showThinking = this.context.workspaceState.get<boolean>('piRpc.showThinking') ?? false;
     const title = this.titleForContext(context, snapshot);
     const host = this.hosts.get(resource.toString());
-    if (host) {
+    if (host && !host.disposed) {
       if (host.panel.visible) this.pendingVisibleFlush.delete(resource.toString());
       this.follow.logger = this.logger;
       this.follow.handleSnapshot(
@@ -2830,10 +2863,10 @@ export class ChatTabManager implements vscode.Disposable {
         // The pane follows the chat the user can SEE (visible ≠ focused —
         // focus stays wherever the user is typing). Live updates arrive with
         // active:false, so the render-path flag was never the right signal.
-        host.panel.visible,
+        !host.disposed && host.panel.visible,
         safeFsPath(context.target.workspaceFolderUri) ??
           vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-        (payload) => void host.panel.webview.postMessage(payload),
+        (payload) => host.post(payload),
         snapshot.connectionState === 'busy' || snapshot.isStreaming === true
       );
       await host.postSnapshot(snapshot, title, this.unseenCompletions.has(resource.toString()));

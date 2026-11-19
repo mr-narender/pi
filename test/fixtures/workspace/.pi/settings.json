@@ -1,0 +1,5 @@
+{
+  "extensions": [
+    "./extensions/pi-approval-gate.ts"
+  ]
+}

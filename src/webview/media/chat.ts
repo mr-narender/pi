@@ -2677,13 +2677,35 @@ function renderNow(snapshot: WebviewSnapshot): void {
   for (const button of Array.from(root.querySelectorAll<HTMLButtonElement>('.msg-copy'))) {
     bindOnce(button, 'click', () => {
       const article = button.closest('.message-card');
-      const hasRawPayload = button.dataset.copyRaw !== undefined;
-      const text =
+      const sourceText =
         button.dataset.copyRaw ??
-        article?.querySelector('.tl-answer .tl-body')?.textContent ??
-        article?.querySelector('.message-body')?.textContent ??
-        article?.querySelector('.tl-body')?.textContent ??
-        '';
+        currentSnapshot?.messages.find(
+          (message) => message.id === article?.getAttribute('data-mid')
+        )?.text;
+      const hasRawPayload = sourceText !== undefined;
+      const body =
+        article?.querySelector('.tl-answer .tl-body') ??
+        article?.querySelector('.message-body') ??
+        article?.querySelector('.tl-body');
+      const fallback = !hasRawPayload
+        ? (body?.cloneNode(true) as HTMLElement | undefined)
+        : undefined;
+      if (fallback && body) {
+        const originals = body.querySelectorAll('*');
+        fallback.querySelectorAll('*').forEach((node, index) => {
+          const original = originals[index]!;
+          const style = getComputedStyle(original);
+          if (
+            original.matches(
+              'button, input, select, textarea, [hidden], [aria-hidden="true"], script, style'
+            ) ||
+            style.display === 'none' ||
+            style.visibility === 'hidden'
+          )
+            node.remove();
+        });
+      }
+      const text = sourceText ?? fallback?.textContent ?? '';
       if (!text.trim()) {
         return;
       }

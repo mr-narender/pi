@@ -63,9 +63,39 @@ async function managerFixture() {
 test('interrupted text-only turn resends through the normal send path with an empty draft', async () => {
   const { manager, resource, controller } = await managerFixture();
   Object.assign(controller.snapshot, {
-    messages: [{ role: 'user', content: 'Retry me' }],
+    messages: [
+      { role: 'user', content: 'Retry me' },
+      { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'Partial' }] },
+    ],
+    leafId: 'marker',
     connectionState: 'ready',
-    state: {},
+    state: {
+      shutdownInterruptionEntries: [
+        {
+          type: 'message',
+          id: 'user',
+          parentId: null,
+          message: { role: 'user', content: 'Retry me' },
+        },
+        {
+          type: 'message',
+          id: 'assistant',
+          parentId: 'user',
+          message: {
+            role: 'assistant',
+            stopReason: 'aborted',
+            content: [{ type: 'text', text: 'Partial' }],
+          },
+        },
+        {
+          type: 'custom',
+          id: 'marker',
+          parentId: 'assistant',
+          customType: 'vscode-pi.turn-interrupted',
+          data: { reason: 'signal' },
+        },
+      ],
+    },
   });
   const actions: unknown[] = [];
   manager.uiState = {
@@ -82,9 +112,39 @@ test('interrupted text-only turn resends through the normal send path with an em
 test('interrupted turn never overwrites or sends an existing draft', async () => {
   const { manager, resource, controller } = await managerFixture();
   Object.assign(controller.snapshot, {
-    messages: [{ role: 'user', content: 'Retry me' }],
+    messages: [
+      { role: 'user', content: 'Retry me' },
+      { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'Partial' }] },
+    ],
+    leafId: 'marker',
     connectionState: 'ready',
-    state: {},
+    state: {
+      shutdownInterruptionEntries: [
+        {
+          type: 'message',
+          id: 'user',
+          parentId: null,
+          message: { role: 'user', content: 'Retry me' },
+        },
+        {
+          type: 'message',
+          id: 'assistant',
+          parentId: 'user',
+          message: {
+            role: 'assistant',
+            stopReason: 'aborted',
+            content: [{ type: 'text', text: 'Partial' }],
+          },
+        },
+        {
+          type: 'custom',
+          id: 'marker',
+          parentId: 'assistant',
+          customType: 'vscode-pi.turn-interrupted',
+          data: { reason: 'signal' },
+        },
+      ],
+    },
   });
   manager.uiState = {
     getComposerStateForIdentity: async () => ({ draft: 'Keep me' }),

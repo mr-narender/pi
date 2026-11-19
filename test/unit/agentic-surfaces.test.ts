@@ -309,3 +309,57 @@ test('native input and inline multiline editor callbacks respond without opening
   assert.equal(controller.replies.length, 2);
   broker.dispose();
 });
+
+test('unseen completion disposal never reads the dead panel and always removes the Open chat', async () => {
+  const classes = await nativeClasses({});
+  for (const cacheFails of [false, true]) {
+    const manager = Object.create(classes.ChatTabManager.prototype);
+    const resource = { toString: () => 'pi-chat:/unseen.chat' };
+    const controller = {};
+    const host = {
+      resource,
+      get panel(): never {
+        throw new Error('Webview is disposed');
+      },
+    };
+    let unbound = false;
+    let removed = false;
+    let refreshed = false;
+    let recent = false;
+    Object.assign(manager, {
+      contextForResource: () => ({ controller }),
+      sessions: {
+        keyFor: () => 'session',
+        unbind: () => {
+          unbound = true;
+        },
+      },
+      unseenCompletions: new Set([resource.toString()]),
+      hosts: new Map([[resource.toString(), host]]),
+      pendingVisibleFlush: new Set([resource.toString()]),
+      openChatsEmitter: {
+        fire: () => {
+          refreshed = true;
+        },
+      },
+      cache: {
+        markClosed: async () => {
+          recent = true;
+          if (cacheFails) throw new Error('storage failed');
+        },
+      },
+      registry: {
+        remove: () => {
+          removed = true;
+        },
+      },
+      outboxBindings: new Map(),
+      logger: { warn() {} },
+    });
+    await manager.onHostDisposed(host);
+    assert.equal(unbound && removed && refreshed && recent, true);
+    assert.deepEqual(manager.listOpenChats(), [], 'sidebar receives no stale Open row');
+    assert.equal(manager.unseenCompletions.size, 0);
+    assert.equal(manager.pendingVisibleFlush.size, 0);
+  }
+});
