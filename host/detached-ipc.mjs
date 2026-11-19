@@ -9,12 +9,13 @@
  *
  * This module owns only the deterministic, separately testable primitives
  * (constant-time compare, per-session replay ring buffer, active-turn tracker,
- * idle-exit manager) plus the socket server (auth, per-session acks, single
- * attach). It never imports the Pi SDK, so it is unit-testable in isolation.
+ * idle-exit manager) plus the socket server (HMAC-SHA256 challenge-response
+ * auth, per-session acks, single attach, pre-auth DoS protection).
+ * It never imports the Pi SDK, so it is unit-testable in isolation.
  */
 import net from 'node:net';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, createHmac, randomBytes } from 'node:crypto';
 
 /** Constant-time string equality. Length mismatch is an immediate, safe fail. */
 export function constantTimeEqual(a, b) {
@@ -26,6 +27,11 @@ export function constantTimeEqual(a, b) {
     return false;
   }
   return timingSafeEqual(ba, bb);
+}
+
+/** HMAC-SHA256 helper: returns hex digest. */
+export function hmacSha256(key, data) {
+  return createHmac('sha256', key).update(data).digest('hex');
 }
 
 /**
@@ -171,15 +177,30 @@ export function createIdleManager({
   };
 }
 
-function attachLineReader(socket, onLine) {
+/** Pre-auth byte cap (64 KiB). */
+const PRE_AUTH_MAX_BYTES = 64 * 1024;
+/** Pre-auth auth deadline (5 seconds). */
+const AUTH_DEADLINE_MS = 5_000;
+/** Max concurrent unauthenticated connections. */
+const MAX_UNAUTHED_CONNS = 16;
+
+function attachLineReader(socket, onLine, opts = {}) {
   let buffer = '';
+  let bufferBytes = 0;
+  const maxBytes = opts.maxBytes ?? Infinity;
   socket.setEncoding('utf8');
   socket.on('data', (chunk) => {
+    bufferBytes += Buffer.byteLength(chunk, 'utf8');
+    if (bufferBytes > maxBytes) {
+      socket.destroy();
+      return;
+    }
     buffer += chunk;
     let index;
     while ((index = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, index);
       buffer = buffer.slice(index + 1);
+      bufferBytes = Buffer.byteLength(buffer, 'utf8');
       if (line.trim()) onLine(line);
     }
   });
@@ -188,21 +209,39 @@ function attachLineReader(socket, onLine) {
 /**
  * IPC server over a Unix domain socket or Windows named pipe.
  *
- * Protocol:
- *   client → server first frame: {"auth":"<hex>","sessions":{"<k>":<ackSeq>}}
- *   server → client on auth:     {"attach":{ok:true,sessions:{<k>:{state}}}}
- *                                 followed by replayed data frames, or
- *                                {"attach":{ok:false,error:"unauthorized"}}
- *   server → client data frame:  {"f":{k,d},"s":<seq>}
- *   client → server after auth:  raw {k,d} envelopes (routed to onInbound) and
- *                                {"ack":{"<k>":<seq>}} control frames.
+ * Protocol (HMAC-SHA256 challenge-response, mutual authentication):
+ *
+ *   Step 1 — client → server:
+ *     {"hello":true,"clientNonce":"<64 hex chars = 32 random bytes>"}
+ *
+ *   Step 2 — server → client:
+ *     {"challenge":true,
+ *      "serverProof": HMAC-SHA256(token, "server" || clientNonce || serverNonce),
+ *      "serverNonce":"<64 hex chars>"}
+ *
+ *   Step 3 — client verifies serverProof (constant-time). On mismatch it
+ *     disconnects immediately (never sends anything derived from the token to
+ *     an unverified server). On success:
+ *     client → server:
+ *     {"clientProof": HMAC-SHA256(token, "client" || serverNonce || clientNonce),
+ *      "sessions":{"<k>":<ackSeq>}}
+ *
+ *   Step 4 — server verifies clientProof (constant-time). On success → attach.
+ *     server → client: {"attach":{ok:true,sessions:{<k>:{state}}}}
+ *                      followed by replayed data frames.
+ *     On failure:      {"attach":{ok:false,error:"unauthorized"}}
+ *
+ *   After auth:
+ *     server → client data frame:  {"f":{k,d},"s":<seq>}
+ *     client → server after auth:  raw {k,d} envelopes (routed to onInbound) and
+ *                                  {"ack":{"<k>":<seq>}} control frames.
  *
  * Single attach: a session is controlled by at most one connection; a second
  * client listing it gets {state:"busy-elsewhere"} and receives no control.
  */
 export function createIpcServer({
   endpoint,
-  readToken,
+  token,
   onInbound,
   replayFor,
   onClientAttached,
@@ -210,9 +249,34 @@ export function createIpcServer({
 }) {
   const controllers = new Map(); // sessionKey -> connection
   let nextConnId = 1;
+  const unauthConns = new Set();
 
   const server = net.createServer((socket) => {
-    const conn = { id: nextConnId++, socket, authed: false, sessions: new Set() };
+    // Enforce concurrent unauthenticated connection cap.
+    if (unauthConns.size >= MAX_UNAUTHED_CONNS) {
+      socket.destroy();
+      return;
+    }
+
+    const conn = {
+      id: nextConnId++,
+      socket,
+      authed: false,
+      sessions: new Set(),
+      authPhase: 'awaiting_hello', // 'awaiting_hello' | 'awaiting_proof' | 'done'
+      clientNonce: undefined,
+      serverNonce: undefined,
+    };
+    unauthConns.add(conn);
+
+    // Auth deadline: destroy unauthenticated sockets after 5s.
+    const authTimer = setTimeout(() => {
+      if (!conn.authed) {
+        socket.destroy();
+      }
+    }, AUTH_DEADLINE_MS);
+    authTimer.unref?.();
+
     const write = (obj) => {
       try {
         socket.write(JSON.stringify(obj) + '\n');
@@ -221,69 +285,113 @@ export function createIpcServer({
       }
     };
 
-    attachLineReader(socket, (line) => {
-      let msg;
-      try {
-        msg = JSON.parse(line);
-      } catch {
-        return;
-      }
-      if (!conn.authed) {
-        const ok = constantTimeEqual(msg && msg.auth, readToken());
-        if (!ok) {
-          write({ attach: { ok: false, error: 'unauthorized' } });
-          socket.destroy();
+    const rejectAuth = (reason) => {
+      write({ attach: { ok: false, error: reason || 'unauthorized' } });
+      socket.destroy();
+    };
+
+    attachLineReader(
+      socket,
+      (line) => {
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
           return;
         }
-        conn.authed = true;
-        const acks = (msg && msg.sessions) || {};
-        const sessionStates = {};
-        const replay = [];
-        for (const [k, ack] of Object.entries(acks)) {
-          const other = controllers.get(k);
-          if (other && other !== conn) {
-            sessionStates[k] = { state: 'busy-elsewhere' };
-            continue;
+
+        // --- Auth Phase: awaiting_hello ---
+        if (conn.authPhase === 'awaiting_hello') {
+          if (!msg || !msg.hello || typeof msg.clientNonce !== 'string') {
+            rejectAuth('bad_hello');
+            return;
           }
-          controllers.set(k, conn);
-          conn.sessions.add(k);
-          const result = replayFor(k, Number(ack) || 0);
-          sessionStates[k] = { state: result.overflow ? 'resync' : 'attached', seq: result.seq };
-          for (const f of result.frames) replay.push(f);
-        }
-        write({ attach: { ok: true, sessions: sessionStates } });
-        for (const f of replay) write(f);
-        onClientAttached?.(conn);
-        return;
-      }
-      if (msg && msg.ack) return; // acks are advisory; buffer is seq-driven
-      // Take control of a session on first open from this connection.
-      if (msg && msg.k && msg.d && msg.d.type === 'open') {
-        const other = controllers.get(msg.k);
-        if (other && other !== conn) {
-          write({
-            f: {
-              k: msg.k,
-              d: {
-                type: 'response',
-                command: 'open',
-                success: false,
-                error: 'SDK_SESSION_BUSY_ELSEWHERE',
-              },
-            },
-            s: 0,
-          });
+          // Validate clientNonce: must be exactly 64 hex chars (32 bytes).
+          if (!/^[0-9a-f]{64}$/i.test(msg.clientNonce)) {
+            rejectAuth('bad_nonce');
+            return;
+          }
+          conn.clientNonce = msg.clientNonce;
+          conn.serverNonce = randomBytes(32).toString('hex');
+          // Server proves it knows the token.
+          const serverProof = hmacSha256(token, 'server' + conn.clientNonce + conn.serverNonce);
+          write({ challenge: true, serverProof, serverNonce: conn.serverNonce });
+          conn.authPhase = 'awaiting_proof';
           return;
         }
-        controllers.set(msg.k, conn);
-        conn.sessions.add(msg.k);
-      }
-      // Only route control for sessions this connection owns.
-      if (msg && msg.k && controllers.get(msg.k) && controllers.get(msg.k) !== conn) return;
-      onInbound(line);
-    });
+
+        // --- Auth Phase: awaiting_proof ---
+        if (conn.authPhase === 'awaiting_proof') {
+          if (!msg || typeof msg.clientProof !== 'string') {
+            rejectAuth('bad_proof');
+            return;
+          }
+          // Verify client proof.
+          const expected = hmacSha256(token, 'client' + conn.serverNonce + conn.clientNonce);
+          if (!constantTimeEqual(msg.clientProof, expected)) {
+            rejectAuth('unauthorized');
+            return;
+          }
+          // Auth succeeded.
+          conn.authed = true;
+          conn.authPhase = 'done';
+          clearTimeout(authTimer);
+          unauthConns.delete(conn);
+
+          const acks = (msg && msg.sessions) || {};
+          const sessionStates = {};
+          const replay = [];
+          for (const [k, ack] of Object.entries(acks)) {
+            const other = controllers.get(k);
+            if (other && other !== conn) {
+              sessionStates[k] = { state: 'busy-elsewhere' };
+              continue;
+            }
+            controllers.set(k, conn);
+            conn.sessions.add(k);
+            const result = replayFor(k, Number(ack) || 0);
+            sessionStates[k] = { state: result.overflow ? 'resync' : 'attached', seq: result.seq };
+            for (const f of result.frames) replay.push(f);
+          }
+          write({ attach: { ok: true, sessions: sessionStates } });
+          for (const f of replay) write(f);
+          onClientAttached?.(conn);
+          return;
+        }
+
+        // --- Authenticated: normal message routing ---
+        if (msg && msg.ack) return; // acks are advisory; buffer is seq-driven
+        // Take control of a session on first open from this connection.
+        if (msg && msg.k && msg.d && msg.d.type === 'open') {
+          const other = controllers.get(msg.k);
+          if (other && other !== conn) {
+            write({
+              f: {
+                k: msg.k,
+                d: {
+                  type: 'response',
+                  command: 'open',
+                  success: false,
+                  error: 'SDK_SESSION_BUSY_ELSEWHERE',
+                },
+              },
+              s: 0,
+            });
+            return;
+          }
+          controllers.set(msg.k, conn);
+          conn.sessions.add(msg.k);
+        }
+        // Only route control for sessions this connection owns.
+        if (msg && msg.k && controllers.get(msg.k) && controllers.get(msg.k) !== conn) return;
+        onInbound(line);
+      },
+      { maxBytes: conn.authed ? Infinity : PRE_AUTH_MAX_BYTES }
+    );
 
     const teardown = () => {
+      clearTimeout(authTimer);
+      unauthConns.delete(conn);
       for (const k of conn.sessions) {
         if (controllers.get(k) === conn) controllers.delete(k);
       }
@@ -345,13 +453,26 @@ export function createIpcServer({
   };
 }
 
-/** Read the token from the file whose path is in PI_HOST_TOKEN_FILE. */
+/**
+ * Read the token from the file whose path is in PI_HOST_TOKEN_FILE.
+ * Returns the token string or throws if the token is unusable.
+ * The token must be at least 64 hex characters.
+ */
 export function readTokenFromEnv(env = process.env) {
   const file = env.PI_HOST_TOKEN_FILE;
-  if (!file) return '';
-  try {
-    return readFileSync(file, 'utf8').trim();
-  } catch {
-    return '';
+  if (!file) {
+    throw new Error('PI_HOST_TOKEN_FILE is not set');
   }
+  let content;
+  try {
+    content = readFileSync(file, 'utf8').trim();
+  } catch (err) {
+    throw new Error(`Cannot read token file ${file}: ${err && err.message}`);
+  }
+  if (!/^[0-9a-f]{64,}$/i.test(content)) {
+    throw new Error(
+      `Token in ${file} is invalid: must be at least 64 hex characters (got ${content.length} chars)`
+    );
+  }
+  return content;
 }

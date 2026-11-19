@@ -1815,6 +1815,17 @@ void (async () => {
     createIpcServer,
     readTokenFromEnv,
   } = await import('./detached-ipc.mjs');
+
+  // Read the token ONCE at startup and keep it in memory. If the token is
+  // unusable the runtime refuses to start (fail-closed).
+  let token;
+  try {
+    token = readTokenFromEnv(process.env);
+  } catch (err) {
+    process.stderr.write(`pi-host IPC token error: ${(err && err.message) || err}\n`);
+    process.exit(1);
+  }
+
   const ringBuffer = createRingBuffer({
     maxBytes: Number(process.env.PI_HOST_REPLAY_MAX_BYTES) || 4 * 1024 * 1024,
     maxCount: Number(process.env.PI_HOST_REPLAY_MAX_COUNT) || 2000,
@@ -1840,7 +1851,7 @@ void (async () => {
   };
   ipcServer = createIpcServer({
     endpoint: process.env.PI_HOST_IPC_ENDPOINT,
-    readToken: () => readTokenFromEnv(process.env),
+    token,
     onInbound: handleInboundEnvelope,
     replayFor: (k, ack) => ringBuffer.since(k, ack),
     onClientAttached: () => idle.clientAttached(),

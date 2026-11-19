@@ -12,7 +12,7 @@ import {
 import { getSharedPiHost } from './sharedPiHost';
 import { spawnDetachedRuntime, type DetachedRuntime } from './detachedRuntime/detachedHost';
 import { DetachedIpcConnection } from './detachedRuntime/ipcClient';
-import { findByEnv } from './detachedRuntime/registry';
+import { acquireLock, findByEnv } from './detachedRuntime/registry';
 import { readTokenFile } from './detachedRuntime/token';
 import { detachedRuntimeBaseDir } from './detachedRuntime/stopRuntimes';
 
@@ -362,44 +362,52 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     const cancelled = () =>
       Object.assign(new Error('Pi startup was cancelled'), { code: 'SDK_STARTUP_CANCELLED' });
 
-    // Look for a live runtime for this (sdkRoot, envKey).
-    let entry = findByEnv(baseDir, sdkRoot, envKey);
+    // Hold the registry lock across find → spawn → add to prevent two windows
+    // from spawning duplicate runtimes for the same (sdkRoot, envKey).
+    let entry: import('./detachedRuntime/registry').RuntimeEntry | undefined;
     let token: string | undefined;
     let runtime: DetachedRuntime | undefined;
 
-    if (entry) {
-      // Try to read the token for the existing runtime.
-      try {
-        token = readTokenFile(entry.tokenFile);
-      } catch {
-        // Token file gone: stale entry; will spawn a new runtime.
-        entry = undefined;
-      }
-    }
+    const release = acquireLock(baseDir);
+    try {
+      entry = findByEnv(baseDir, sdkRoot, envKey);
 
-    if (!entry) {
-      // No live runtime: spawn a new detached one.
-      if (!this.extensionPath) {
-        throw new Error('extensionPath is required to spawn a detached runtime');
+      if (entry) {
+        // Try to read the token for the existing runtime.
+        try {
+          token = readTokenFile(entry.tokenFile);
+        } catch {
+          // Token file gone: stale entry; will spawn a new runtime.
+          entry = undefined;
+        }
       }
-      const hostScript = pathJoin(this.extensionPath, 'host', 'pi-multi-host.mjs');
-      if (!existsSync(hostScript)) {
-        this.logger.warn(
-          `Detached runtime host script not found at ${hostScript}; falling back to shared host`
-        );
-        return undefined;
+
+      if (!entry) {
+        // No live runtime: spawn a new detached one.
+        if (!this.extensionPath) {
+          throw new Error('extensionPath is required to spawn a detached runtime');
+        }
+        const hostScript = pathJoin(this.extensionPath, 'host', 'pi-multi-host.mjs');
+        if (!existsSync(hostScript)) {
+          this.logger.warn(
+            `Detached runtime host script not found at ${hostScript}; falling back to shared host`
+          );
+          return undefined;
+        }
+        runtime = await spawnDetachedRuntime({
+          hostScript,
+          sdkRoot,
+          envKey,
+          env: { ...env },
+          cwd,
+          runtimeBaseDir: baseDir,
+          idleMs: this.settings.detachedRuntimeIdleMinutes * 60 * 1000,
+        });
+        entry = runtime.entry;
+        token = runtime.token;
       }
-      runtime = await spawnDetachedRuntime({
-        hostScript,
-        sdkRoot,
-        envKey,
-        env: { ...env },
-        cwd,
-        runtimeBaseDir: baseDir,
-        idleMs: this.settings.detachedRuntimeIdleMinutes * 60 * 1000,
-      });
-      entry = runtime.entry;
-      token = runtime.token;
+    } finally {
+      release();
     }
 
     if (startEpoch !== this.startEpoch) throw cancelled();

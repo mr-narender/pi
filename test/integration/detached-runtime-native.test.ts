@@ -95,7 +95,9 @@ test(
       const client = new DetachedIpcConnection();
       const result = await client.connect(runtime.endpoint, 'deadbeef'.repeat(8), {});
       assert.equal(result.ok, false);
-      assert.equal(result.error, 'unauthorized');
+      // With HMAC mutual auth the client detects the server doesn't know the
+      // token (serverProof mismatch) before it ever sends a proof.
+      assert.equal(result.error, 'server_auth_failed');
       client.dispose();
       runtime.child.kill('SIGKILL');
     } finally {

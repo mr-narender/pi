@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -63,9 +63,78 @@ export function runtimeDir(ctx: EndpointEnv = currentEndpointEnv(), remoteName?:
   return path.join(base, `pi-vscode-${hash}`);
 }
 
-/** Create the per-user runtime dir with 0700 perms (POSIX). */
-export function ensureRuntimeDir(dir: string, platform: NodeJS.Platform = process.platform): void {
-  mkdirSync(dir, { recursive: true, mode: platform === 'win32' ? undefined : 0o700 });
+/**
+ * Stat-based options for directory validation. Injectable for testing.
+ */
+export interface DirStatOpts {
+  lstatSync?: (p: string) => { isSymbolicLink(): boolean; uid: number; mode: number };
+  getuid?: () => number;
+}
+
+/**
+ * Validate a directory is safe for use as a UDS endpoint:
+ * - Not a symlink
+ * - Owned by the current uid
+ * - No group/other permissions (mode & 0o077 === 0)
+ *
+ * Returns true if safe, false otherwise.
+ */
+export function validateDirSecurity(dir: string, opts: DirStatOpts = {}): boolean {
+  const lstat = opts.lstatSync ?? lstatSync;
+  const getuid = opts.getuid ?? (process.getuid ? () => process.getuid!() : () => -1);
+
+  try {
+    const stat = lstat(dir);
+    if (stat.isSymbolicLink()) return false;
+    const myUid = getuid();
+    if (myUid >= 0 && stat.uid !== myUid) return false;
+    if ((stat.mode & 0o077) !== 0) return false;
+    return true;
+  } catch {
+    return false; // doesn't exist yet → safe to create
+  }
+}
+
+/**
+ * Create the per-user runtime dir with 0700 perms (POSIX).
+ *
+ * Hardened: on POSIX, after creating/finding the directory, lstat it to verify
+ * it is not a symlink, is owned by the current user, and has no group/other
+ * permissions. If the existing directory fails these checks, a new directory
+ * with an unpredictable name is used instead (fail-closed).
+ */
+export function ensureRuntimeDir(
+  dir: string,
+  platform: NodeJS.Platform = process.platform,
+  statOpts: DirStatOpts = {}
+): string {
+  if (platform === 'win32') {
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  // Try to create or use the requested directory.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+
+  // Validate the directory after creation (mkdirSync with recursive does not
+  // correct permissions on an existing directory).
+  if (validateDirSecurity(dir, statOpts)) {
+    return dir;
+  }
+
+  // The existing directory is unsafe (symlink, wrong owner, or wrong perms).
+  // Create a new unpredictable directory under the same parent.
+  const parent = path.dirname(dir);
+  const safeDir = mkdtempSync(path.join(parent, 'pi-vscode-safe-'));
+  // mkdtempSync creates with 0700 by default on POSIX (umask-masked, but we
+  // set mode explicitly on the new dir to be sure).
+  try {
+    const { chmodSync } = require('node:fs') as typeof import('node:fs');
+    chmodSync(safeDir, 0o700);
+  } catch {
+    /* best effort */
+  }
+  return safeDir;
 }
 
 /**

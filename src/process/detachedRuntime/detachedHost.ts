@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import * as path from 'node:path';
 
 import {
   currentEndpointEnv,
@@ -88,10 +89,14 @@ export async function spawnDetachedRuntime(
 ): Promise<DetachedRuntime> {
   const ctx = options.endpointEnv ?? currentEndpointEnv();
   const id = randomUUID();
-  const dir = runtimeDir(ctx);
-  ensureRuntimeDir(dir, ctx.platform);
+  const safeDir = ensureRuntimeDir(runtimeDir(ctx), ctx.platform);
   ensureRuntimeDir(options.runtimeBaseDir, ctx.platform);
-  const endpoint = options.endpointOverride ?? ipcEndpoint(id, ctx);
+  // Use the safe dir (which may differ from the predictable runtimeDir if the
+  // latter was compromised) for the socket endpoint.
+  const shortId = createHash('sha256').update(id).digest('hex').slice(0, 10);
+  const endpoint =
+    options.endpointOverride ??
+    (ctx.platform === 'win32' ? ipcEndpoint(id, ctx) : path.join(safeDir, `${shortId}.sock`));
   const tokenFile = tokenFilePath(options.runtimeBaseDir, id);
   const token = generateToken();
   writeTokenFile(tokenFile, token);

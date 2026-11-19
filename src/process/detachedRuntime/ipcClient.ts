@@ -1,12 +1,13 @@
 import { connect, type Socket } from 'node:net';
 import { once } from 'node:events';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { PassThrough, Writable } from 'node:stream';
 import type { PiProcessHandle } from '../piProcess';
 
 // Extension-side client for a detached runtime. Connects to the local IPC
-// endpoint, presents the token + per-session acks in the first frame, then
-// speaks the same multiplexed {k,d} protocol the stdio host used — unwrapping
-// the {f,s} replay/live frames and tracking the last seq per session so a later
+// endpoint, performs HMAC-SHA256 mutual authentication, then speaks the same
+// multiplexed {k,d} protocol the stdio host used — unwrapping the {f,s}
+// replay/live frames and tracking the last seq per session so a later
 // re-attach can ask only for what it missed. Mirrors HostWorkerConn's framing.
 
 export interface AttachSessionState {
@@ -29,12 +30,37 @@ interface Channel {
   lastSeq: number;
 }
 
+/** Constant-time string comparison for HMAC verification. */
+function constantTimeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ba.length !== bb.length) {
+    timingSafeEqual(ba, ba);
+    return false;
+  }
+  return timingSafeEqual(ba, bb);
+}
+
+/** HMAC-SHA256 helper: returns hex digest. */
+function hmacSha256(key: string, data: string): string {
+  return createHmac('sha256', key).update(data).digest('hex');
+}
+
 export class DetachedIpcConnection {
   private socket: Socket | undefined;
   private buffer = '';
   private readonly channels = new Map<string, Channel>();
   private pendingAttach: ((result: AttachResult) => void) | undefined;
   private attachTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Set during the challenge-response auth flow. */
+  private authState:
+    | {
+        token: string;
+        clientNonce: string;
+        acks: Record<string, number>;
+        pendingResolve: (result: AttachResult) => void;
+      }
+    | undefined;
 
   public constructor(public readonly sdkRoot?: string) {}
 
@@ -47,7 +73,10 @@ export class DetachedIpcConnection {
     return channel;
   }
 
-  /** Connect + authenticate. `acks` maps session key → last seq already seen. */
+  /**
+   * Connect + authenticate with HMAC-SHA256 mutual auth.
+   * `acks` maps session key → last seq already seen.
+   */
   public async connect(
     endpoint: string,
     token: string,
@@ -66,10 +95,15 @@ export class DetachedIpcConnection {
       this.pendingAttach = resolve;
       this.attachTimer = setTimeout(() => {
         this.pendingAttach = undefined;
+        this.authState = undefined;
         reject(new Error('Timed out authenticating with detached runtime'));
       }, timeoutMs);
     });
-    socket.write(JSON.stringify({ auth: token, sessions: acks }) + '\n');
+
+    // Step 1: Send hello with clientNonce.
+    const clientNonce = randomBytes(32).toString('hex');
+    this.authState = { token, clientNonce, acks, pendingResolve: this.pendingAttach! };
+    socket.write(JSON.stringify({ hello: true, clientNonce }) + '\n');
     return result;
   }
 
@@ -84,12 +118,66 @@ export class DetachedIpcConnection {
   }
 
   private routeLine(line: string): void {
-    let msg: { attach?: AttachResult; f?: { k: string; d: Record<string, unknown> }; s?: number };
+    let msg: {
+      challenge?: boolean;
+      serverProof?: string;
+      serverNonce?: string;
+      attach?: AttachResult;
+      f?: { k: string; d: Record<string, unknown> };
+      s?: number;
+    };
     try {
       msg = JSON.parse(line);
     } catch {
       return;
     }
+
+    // Step 2: Server sends challenge with serverProof + serverNonce.
+    if (msg.challenge && this.authState) {
+      const { token, clientNonce, acks } = this.authState;
+      const serverNonce = msg.serverNonce;
+      const serverProof = msg.serverProof;
+
+      if (typeof serverNonce !== 'string' || typeof serverProof !== 'string') {
+        // Invalid challenge — abort without revealing token.
+        this.authState = undefined;
+        this.dispose();
+        if (this.pendingAttach) {
+          if (this.attachTimer) clearTimeout(this.attachTimer);
+          const resolve = this.pendingAttach;
+          this.pendingAttach = undefined;
+          resolve({ ok: false, error: 'invalid_challenge', sessions: {} });
+        }
+        return;
+      }
+
+      // Verify server proof (constant-time). If the server doesn't know the
+      // token, we abort immediately — never send anything derived from token.
+      const expectedServerProof = hmacSha256(token, 'server' + clientNonce + serverNonce);
+      if (!constantTimeEqual(serverProof, expectedServerProof)) {
+        this.authState = undefined;
+        this.dispose();
+        if (this.pendingAttach) {
+          if (this.attachTimer) clearTimeout(this.attachTimer);
+          const resolve = this.pendingAttach;
+          this.pendingAttach = undefined;
+          resolve({ ok: false, error: 'server_auth_failed', sessions: {} });
+        }
+        return;
+      }
+
+      // Step 3: Send clientProof + sessions.
+      const clientProof = hmacSha256(token, 'client' + serverNonce + clientNonce);
+      this.authState = undefined;
+      try {
+        this.socket?.write(JSON.stringify({ clientProof, sessions: acks }) + '\n');
+      } catch {
+        /* socket gone */
+      }
+      return;
+    }
+
+    // Step 4: Server responds with attach result.
     if (msg.attach && this.pendingAttach) {
       if (this.attachTimer) clearTimeout(this.attachTimer);
       const resolve = this.pendingAttach;
@@ -209,6 +297,7 @@ export class DetachedIpcConnection {
 
   private failAll(error: Error): void {
     if (this.attachTimer) clearTimeout(this.attachTimer);
+    this.authState = undefined;
     if (this.pendingAttach) {
       const resolve = this.pendingAttach;
       this.pendingAttach = undefined;
@@ -228,6 +317,7 @@ export class DetachedIpcConnection {
   public dispose(): void {
     const socket = this.socket;
     this.socket = undefined;
+    this.authState = undefined;
     try {
       socket?.destroy();
     } catch {
