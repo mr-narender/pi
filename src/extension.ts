@@ -288,7 +288,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     )}`
   );
   const sessionIndex = new SessionIndexService(context.extensionPath, logger);
-  const registry = new SessionRegistry(logger, sessionIndex);
+  const registry = new SessionRegistry(
+    logger,
+    sessionIndex,
+    context.globalStorageUri.fsPath,
+    context.extensionPath
+  );
   const statusBar = new StatusBarController();
   context.subscriptions.push({ dispose: () => sessionIndex.dispose() });
   const recentSessions = new RecentSessionService(sessionIndex);
