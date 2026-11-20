@@ -12,8 +12,13 @@ import {
 import { getSharedPiHost } from './sharedPiHost';
 import { spawnDetachedRuntime, type DetachedRuntime } from './detachedRuntime/detachedHost';
 import { DetachedIpcConnection } from './detachedRuntime/ipcClient';
-import { acquireLock, findByEnv } from './detachedRuntime/registry';
+import { acquireLock, findAllBySdkRoot, findByEnv, readRegistry } from './detachedRuntime/registry';
 import { readTokenFile } from './detachedRuntime/token';
+import {
+  readSessionLock,
+  writeSessionLock,
+  releaseSessionLock,
+} from './detachedRuntime/sessionLock';
 import { detachedRuntimeBaseDir } from './detachedRuntime/stopRuntimes';
 
 // On Windows the npm-installed `pi` is a `pi.cmd` shim, which Node's spawn cannot
@@ -68,6 +73,23 @@ export function disposeParkedDetachedDrafts(): void {
 }
 
 /**
+ * Single source of truth for the identity of a detached runtime launch.
+ * Uses resolvePiLaunch (which adds PI_MANAGED_INSTALL_ROOT etc.) so both
+ * warmDetachedRuntime and startDetached produce the same envKey.
+ */
+export function resolveDetachedLaunchIdentity(
+  settings: import('../config/settings').PiRpcSettings,
+  cwd?: string
+): { sdkRoot: string | undefined; env: NodeJS.ProcessEnv; envKey: string } {
+  const launch = resolvePiLaunch(settings, piLaunchEnvironment(settings), cwd);
+  return {
+    sdkRoot: launch.sdkRoot,
+    env: launch.env as NodeJS.ProcessEnv,
+    envKey: PiProcessSupervisor.computeEnvKey(launch.env as NodeJS.ProcessEnv),
+  };
+}
+
+/**
  * Pre-spawn (or verify) the detached runtime for the sidebar warmup.
  * Folder-neutral: no session, no project resources. The runtime will be
  * ready for the first New Chat to open a session instantly.
@@ -85,6 +107,30 @@ export async function warmDetachedRuntime(opts: {
 
   const release = acquireLock(baseDir);
   try {
+    // --- Duplicate identity awareness (safe: never signal from warmup) ---
+    // If multiple live runtimes share the same identity, log but do NOT
+    // SIGTERM them — a duplicate may hold active sessions or an in-flight
+    // streaming turn.  Duplicates converge naturally: findByEnv prefers the
+    // newest-healthy runtime so new chats land there, and the idle rules
+    // (no attached client + no active turn → exit after idleMinutes) will
+    // retire the other.
+    const allEntries = readRegistry(baseDir);
+    const byIdentity = new Map<string, typeof allEntries>();
+    for (const e of allEntries) {
+      const key = `${e.sdkRoot}\0${e.envKey}`;
+      const list = byIdentity.get(key) ?? [];
+      list.push(e);
+      byIdentity.set(key, list);
+    }
+    for (const [identity, group] of byIdentity) {
+      if (group.length > 1) {
+        opts.logger.info(
+          `Duplicate identity detected (${group.length} runtimes for ${identity}); ` +
+            `idle rules will retire extras — no signal sent`
+        );
+      }
+    }
+
     const existing = findByEnv(baseDir, opts.sdkRoot, envKey);
     if (existing) {
       // Runtime already alive — just verify via token read.
@@ -145,6 +191,8 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
   private detachedConnection: DetachedIpcConnection | undefined;
   /** True when this supervisor is using a detached runtime (not the shared host). */
   private usingDetached = false;
+  /** Session file path for session lock release on stop. */
+  private detachedSessionFile: string | undefined;
 
   public constructor(
     private readonly folder: vscode.WorkspaceFolder,
@@ -217,13 +265,15 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
         if (attached) return attached;
       } catch (error) {
         if (startEpoch !== this.startEpoch) throw cancelled();
-        // Busy-elsewhere is a user-visible state, not a transient failure — do
-        // NOT fall back to the shared host (that would open a second controller
-        // on the same session file).
+        // Busy-elsewhere and session-locked are user-visible states, not
+        // transient failures — do NOT fall back to the shared host (that would
+        // open a second controller on the same session file).
         if (
           error instanceof Error &&
           'code' in error &&
-          (error as { code: string }).code === 'SDK_SESSION_BUSY_ELSEWHERE'
+          ['SDK_SESSION_BUSY_ELSEWHERE', 'SDK_SESSION_LOCKED'].includes(
+            (error as { code: string }).code
+          )
         )
           throw error;
         this.logger.warn(
@@ -377,10 +427,14 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
   private async stopClient(): Promise<void> {
     const piProcess = this.piProcess;
     const detachedConn = this.detachedConnection;
+    const sessionFile = this.detachedSessionFile;
     this.transport = undefined;
     this.client = undefined;
     this.piProcess = undefined;
     this.detachedConnection = undefined;
+    this.detachedSessionFile = undefined;
+    // Release the session file lock when explicitly closing.
+    if (sessionFile) releaseSessionLock(sessionFile);
     if (!piProcess) {
       return;
     }
@@ -478,6 +532,40 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     const channelKey =
       existingSessionPath ?? `new-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+    // --- Session-holder lookup (robust re-attach across envKey changes) ---
+    // When resuming an existing session, check ALL live runtimes with the same
+    // sdkRoot to find the one that holds this session. This guarantees an
+    // in-flight turn is never orphaned by an identity change (e.g. after a
+    // settings change between reloads that adds PI_MANAGED_INSTALL_ROOT).
+    if (existingSessionPath) {
+      const holder = await this.findSessionHolder(
+        baseDir,
+        sdkRoot,
+        channelKey,
+        startEpoch,
+        cancelled
+      );
+      if (holder) {
+        if (holder.entry.envKey !== envKey) {
+          this.logger.info(
+            `Re-attaching to session holder with different envKey ` +
+              `(holder=${holder.entry.envKey.slice(0, 8)}, current=${envKey.slice(0, 8)})`
+          );
+        }
+        this.generation += 1;
+        this.detachedConnection = holder.conn;
+        this.usingDetached = true;
+        this.detachedSessionFile = existingSessionPath;
+        const client = this.attachClient(holder.handle, 'detached runtime');
+        options?.onClient?.(client);
+        this.logger.info(
+          `Starting Pi for ${this.folder.name} (generation=${this.generation}) via detached runtime ` +
+            `[cwd=${cwd}, session=${existingSessionPath}, reattach=session-holder]`
+        );
+        return client;
+      }
+    }
+
     // Hold the registry lock across find → spawn → add to prevent two windows
     // from spawning duplicate runtimes for the same (sdkRoot, envKey).
     let entry: import('./detachedRuntime/registry').RuntimeEntry | undefined;
@@ -560,6 +648,20 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
       // Re-attach: the runtime already holds this session.
       handle = conn.attachSession(channelKey);
     } else {
+      // Before opening, check the session file lock to prevent two runtimes
+      // from opening the same session file concurrently.
+      if (existingSessionPath) {
+        const lock = readSessionLock(existingSessionPath);
+        if (lock && lock.runtimeId !== entry!.id) {
+          conn.dispose();
+          throw Object.assign(
+            new Error(
+              `Session file is held by another runtime (${lock.runtimeId}, pid ${lock.pid})`
+            ),
+            { code: 'SDK_SESSION_LOCKED' }
+          );
+        }
+      }
       // Open a new session on the detached runtime.
       try {
         handle = await conn.openSession(channelKey, {
@@ -567,6 +669,14 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           sessionFile: existingSessionPath,
           args,
         });
+        // Write the session lock after successful open.
+        if (existingSessionPath) {
+          writeSessionLock(existingSessionPath, {
+            runtimeId: entry!.id,
+            pid: entry!.pid,
+            timestamp: Date.now(),
+          });
+        }
       } catch (openError) {
         // The runtime refuses open when another client controls this session.
         if (openError instanceof Error && openError.message === 'SDK_SESSION_BUSY_ELSEWHERE') {
@@ -587,6 +697,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     this.generation += 1;
     this.detachedConnection = conn;
     this.usingDetached = true;
+    this.detachedSessionFile = existingSessionPath;
     const client = this.attachClient(handle, 'detached runtime');
     options?.onClient?.(client);
     this.logger.info(
@@ -600,6 +711,70 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     }
 
     return client;
+  }
+
+  /**
+   * Scan all live runtimes with the same sdkRoot and probe each for the target
+   * session. Returns the first holder found (conn + handle ready for re-attach),
+   * or undefined if no runtime holds the session.
+   */
+  private async findSessionHolder(
+    baseDir: string,
+    sdkRoot: string,
+    channelKey: string,
+    startEpoch: number,
+    cancelled: () => Error
+  ): Promise<
+    | {
+        entry: import('./detachedRuntime/registry').RuntimeEntry;
+        conn: DetachedIpcConnection;
+        handle: PiProcessHandle;
+      }
+    | undefined
+  > {
+    const candidates = findAllBySdkRoot(baseDir, sdkRoot);
+    for (const candidate of candidates) {
+      if (startEpoch !== this.startEpoch) throw cancelled();
+      let token: string;
+      try {
+        token = readTokenFile(candidate.tokenFile);
+      } catch {
+        continue; // stale entry
+      }
+      const probe = new DetachedIpcConnection(sdkRoot);
+      try {
+        const acks: Record<string, number> = { [channelKey]: 0 };
+        const result = await probe.connect(candidate.endpoint, token, acks, 5_000);
+        if (!result.ok) {
+          probe.dispose();
+          continue;
+        }
+        const state = result.sessions[channelKey];
+        if (state?.state === 'attached' || state?.state === 'resync') {
+          // This runtime holds the session — re-attach.
+          const handle = probe.attachSession(channelKey);
+          return { entry: candidate, conn: probe, handle };
+        }
+        if (state?.state === 'busy-elsewhere') {
+          probe.dispose();
+          throw Object.assign(new Error('This chat is open in another VS Code window'), {
+            code: 'SDK_SESSION_BUSY_ELSEWHERE',
+          });
+        }
+        // Session not held by this runtime.
+        probe.dispose();
+      } catch (error) {
+        probe.dispose();
+        // Re-throw busy-elsewhere; swallow other probe errors.
+        if (
+          error instanceof Error &&
+          'code' in error &&
+          (error as { code: string }).code === 'SDK_SESSION_BUSY_ELSEWHERE'
+        )
+          throw error;
+      }
+    }
+    return undefined;
   }
 
   /**

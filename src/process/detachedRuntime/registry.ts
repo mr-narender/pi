@@ -195,14 +195,33 @@ export function cleanupStale(
   return live;
 }
 
-/** Live runtime for a given (sdkRoot, envKey), if any (after stale cleanup). */
+/**
+ * Live runtime for a given (sdkRoot, envKey), if any (after stale cleanup).
+ * When multiple entries match (race-spawned duplicates), the newest runtime
+ * (highest `startedAt`) is returned so new chats converge on one process
+ * while the idle rules retire the others.
+ */
 export function findByEnv(
   dir: string,
   sdkRoot: string,
   envKey: string,
   isAlive: (pid: number) => boolean = pidAlive
 ): RuntimeEntry | undefined {
-  return cleanupStale(dir, isAlive).find((e) => e.sdkRoot === sdkRoot && e.envKey === envKey);
+  const matches = cleanupStale(dir, isAlive).filter(
+    (e) => e.sdkRoot === sdkRoot && e.envKey === envKey
+  );
+  if (matches.length <= 1) return matches[0];
+  // Prefer the newest runtime — it is most likely the actively-used one.
+  return matches.reduce((best, cur) => (cur.startedAt >= best.startedAt ? cur : best));
+}
+
+/** All live runtimes for a given sdkRoot (after stale cleanup). */
+export function findAllBySdkRoot(
+  dir: string,
+  sdkRoot: string,
+  isAlive: (pid: number) => boolean = pidAlive
+): RuntimeEntry[] {
+  return cleanupStale(dir, isAlive).filter((e) => e.sdkRoot === sdkRoot);
 }
 
 /**

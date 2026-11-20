@@ -270,10 +270,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             if (settings.detachedRuntimeEnabled) {
               // Pre-spawn the detached runtime (folder-neutral: no session, no
               // project resources) so the first New Chat connects instantly.
-              const { warmDetachedRuntime } = await import('./process/supervisor.js');
+              // Use resolveDetachedLaunchIdentity to get the same env/envKey
+              // that startDetached will use (includes PI_MANAGED_INSTALL_ROOT).
+              const { warmDetachedRuntime, resolveDetachedLaunchIdentity } = await import(
+                './process/supervisor.js'
+              );
+              const identity = resolveDetachedLaunchIdentity(settings);
               await warmDetachedRuntime({
-                sdkRoot,
-                env: piLaunchEnvironment(settings),
+                sdkRoot: identity.sdkRoot ?? sdkRoot,
+                env: identity.env,
                 globalStorageFsPath: context.globalStorageUri.fsPath,
                 extensionPath: context.extensionPath,
                 idleMinutes: settings.detachedRuntimeIdleMinutes,
