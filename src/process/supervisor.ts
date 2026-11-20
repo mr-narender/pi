@@ -212,6 +212,11 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     return this.client;
   }
 
+  /** True when this supervisor is connected to a detached runtime (not the shared host). */
+  public get isDetached(): boolean {
+    return this.usingDetached;
+  }
+
   public get sdkRoot(): string | undefined {
     return this.piProcess?.sdkRoot;
   }

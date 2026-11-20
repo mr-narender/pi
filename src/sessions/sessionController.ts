@@ -2531,7 +2531,19 @@ export class SessionController implements vscode.Disposable {
     this.changeEmitter.fire(this.state);
     cancelModelOperations(this);
     this.disarmSessionFileWatcher();
-    void this.stop();
+    if (this.supervisor.isDetached) {
+      // Detached path: do the controller-side cleanup that stop() does
+      // (epoch, IDE requests, flags) WITHOUT telling the runtime to close.
+      // The runtime keeps in-flight turns running; supervisor.dispose()
+      // below disconnects the IPC socket only.
+      this.startEpoch = (this.startEpoch ?? 0) + 1;
+      for (const request of this.ideRequests?.keys() ?? []) request.abort();
+      this.stopping = true;
+    } else {
+      // Non-detached (shared host / kill-switch-off): stop sends the close
+      // command to the runtime, matching #44 behaviour.
+      void this.stop();
+    }
     this.supervisor.dispose();
     this.changeEmitter.dispose();
     this.extensionUiEmitter.dispose();
