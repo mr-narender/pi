@@ -4443,6 +4443,9 @@ button.composer-thinking:hover {
 body.chat-list-view {
   background-color: var(--vscode-sideBar-background, var(--vscode-editor-background));
   background-image: none;
+  /* VS Code's default webview body padding (0 20px) would inset the list's
+     scrollbar; drop it on the right and re-add the inset inside the list. */
+  padding-right: 0;
 }
 
 .chat-list-shell {
@@ -4452,11 +4455,11 @@ body.chat-list-view {
 }
 
 .chat-list-folder-label {
-  margin-right: 9px;
+  margin-right: 29px;
 }
 
 .chat-list-folder {
-  margin-right: 9px;
+  margin-right: 29px;
   width: auto;
 }
 
@@ -4468,13 +4471,13 @@ body.chat-list-view {
   border-radius: var(--pi-radius-control);
   background: var(--vscode-input-background, var(--pi-surface-control));
   font-size: 12px;
-  margin-right: 10px;
+  margin-right: 30px;
   width: auto;
 }
 
 .chat-list-scroll {
   display: block;
-  padding-right: 9px;
+  padding-right: 29px;
 }
 
 .chat-list-section {
