@@ -115,11 +115,19 @@ if (process.env.PI_HOST_IPC_ENDPOINT) {
       handleInboundEnvelope(line);
     }
   };
+  // Deferred session-file resolver: wired after the SDK loads and the
+  // `sessions` map is reachable. Before that, resolution returns undefined
+  // (which is correct — no sessions can exist yet).
+  let _resolveSessionKey;
+  globalThis.__earlyIpc.setResolveSessionKey = (fn) => {
+    _resolveSessionKey = fn;
+  };
   const ipcSrv = createIpcServer({
     endpoint: process.env.PI_HOST_IPC_ENDPOINT,
     token,
     onInbound: earlyInbound,
     replayFor: (k, ack) => _ringBuffer.since(k, ack),
+    resolveSessionKey: (k) => (_resolveSessionKey ? _resolveSessionKey(k) : undefined),
     onClientAttached: () => _idle.clientAttached(),
     onClientDetached: () => _idle.clientDetached(),
   });
@@ -1690,6 +1698,10 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     },
     handleParsed: scopeCommandDispatcher(handleParsed),
     dispose,
+    /** The SDK's current session file (may change during the session lifecycle). */
+    get sessionFile() {
+      return session.sessionFile;
+    },
   };
 }
 
@@ -1899,6 +1911,25 @@ void (async () => {
   }
   // Wire the outboundSink to use the early-created ring buffer and IPC server.
   outboundSink = early.outboundSink;
+  // Wire session-file → channel-key resolver so a re-attaching client that
+  // passes a session file path as the key (after a window reload for a session
+  // that was originally opened under a different channel key) finds the right
+  // host-side session.
+  if (early.setResolveSessionKey) {
+    early.setResolveSessionKey((fileOrKey) => {
+      // Exact key match: no resolution needed.
+      if (sessions.has(fileOrKey)) return undefined;
+      // Look up by session file among live runners.
+      for (const [channelKey, runner] of sessions) {
+        try {
+          if (runner.sessionFile === fileOrKey) return channelKey;
+        } catch {
+          /* runner may be closing */
+        }
+      }
+      return undefined;
+    });
+  }
   // Signal that the SDK is ready and flush queued inbound messages.
   _earlyIpcResolve = undefined;
   for (const line of _earlyQueue) {

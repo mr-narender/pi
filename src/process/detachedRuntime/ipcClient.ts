@@ -13,6 +13,10 @@ import type { PiProcessHandle } from '../piProcess';
 export interface AttachSessionState {
   state: 'attached' | 'resync' | 'busy-elsewhere';
   seq?: number;
+  /** When the host resolved a different channel key (e.g. the client asked for
+   *  a session file path but the host stores the session under the original
+   *  channel key), this is the host's actual key. Use it for all further I/O. */
+  resolvedKey?: string;
 }
 
 export interface AttachResult {

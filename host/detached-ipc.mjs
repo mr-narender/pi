@@ -72,12 +72,12 @@ export function createRingBuffer({ maxBytes = 4 * 1024 * 1024, maxCount = 2000 }
      */
     since(k, ack) {
       const s = sessions.get(k);
-      if (!s) return { overflow: false, frames: [], seq: 0 };
+      if (!s) return { overflow: false, frames: [], seq: 0, known: false };
       let from = Number.isFinite(ack) ? ack : 0;
       if (from > s.seq) from = s.seq;
       const overflow = from < s.trimmedUpTo;
       const frames = overflow ? [] : s.frames.filter((f) => f.seq > from);
-      return { overflow, frames, seq: s.seq };
+      return { overflow, frames, seq: s.seq, known: true };
     },
     seq(k) {
       return sessions.get(k)?.seq ?? 0;
@@ -244,6 +244,7 @@ export function createIpcServer({
   token,
   onInbound,
   replayFor,
+  resolveSessionKey,
   onClientAttached,
   onClientDetached,
 }) {
@@ -342,15 +343,27 @@ export function createIpcServer({
           const sessionStates = {};
           const replay = [];
           for (const [k, ack] of Object.entries(acks)) {
-            const other = controllers.get(k);
+            // Resolve the requested key: the client may pass a session file path
+            // while the host stores the session under a different channel key.
+            const resolved = (resolveSessionKey ? resolveSessionKey(k) : undefined) ?? k;
+            const other = controllers.get(resolved);
             if (other && other !== conn) {
               sessionStates[k] = { state: 'busy-elsewhere' };
               continue;
             }
-            controllers.set(k, conn);
-            conn.sessions.add(k);
-            const result = replayFor(k, Number(ack) || 0);
-            sessionStates[k] = { state: result.overflow ? 'resync' : 'attached', seq: result.seq };
+            const result = replayFor(resolved, Number(ack) || 0);
+            if (!result.known) {
+              // No session under this key (or resolved key) — do NOT register
+              // the connection as controller for a phantom session.
+              continue;
+            }
+            controllers.set(resolved, conn);
+            conn.sessions.add(resolved);
+            sessionStates[k] = {
+              state: result.overflow ? 'resync' : 'attached',
+              seq: result.seq,
+              resolvedKey: resolved !== k ? resolved : undefined,
+            };
             for (const f of result.frames) replay.push(f);
           }
           write({ attach: { ok: true, sessions: sessionStates } });

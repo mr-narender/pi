@@ -1149,6 +1149,14 @@ export class SessionController implements vscode.Disposable {
             error.code === 'SDK_SESSION_BUSY_ELSEWHERE')
         )
           break;
+        // After a detached re-attach failure (e.g. 'session not open'), a small
+        // backoff prevents hammering the same runtime in a tight loop and gives
+        // the host time to finish any pending session-open/close operations.
+        if (error instanceof Error && /session not open/i.test(error.message)) {
+          const backoffMs = Math.min(200 * Math.pow(2, index), 2000);
+          this.logger.info(`Detached re-attach backoff: ${backoffMs}ms before next attempt`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+        }
       }
     }
 

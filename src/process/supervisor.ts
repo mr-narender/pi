@@ -694,8 +694,10 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
       });
     }
     if (sessionState?.state === 'attached' || sessionState?.state === 'resync') {
-      // Re-attach: the runtime already holds this session.
-      handle = conn.attachSession(channelKey);
+      // Re-attach: the runtime already holds this session. Use the host's
+      // resolved key when the session was opened under a different channel key.
+      const actualKey = sessionState.resolvedKey ?? channelKey;
+      handle = conn.attachSession(actualKey);
     } else {
       // Before opening, check the session file lock to prevent two runtimes
       // from opening the same session file concurrently.
@@ -807,8 +809,12 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
         }
         const state = result.sessions[channelKey];
         if (state?.state === 'attached' || state?.state === 'resync') {
-          // This runtime holds the session — re-attach.
-          const handle = probe.attachSession(channelKey);
+          // This runtime holds the session — re-attach using the host's
+          // actual session key (which may differ from channelKey when the
+          // session was originally opened under a generated key like
+          // 'new-<ts>-<rand>' and the client is now resuming by file path).
+          const actualKey = state.resolvedKey ?? channelKey;
+          const handle = probe.attachSession(actualKey);
           return { entry: candidate, conn: probe, handle };
         }
         if (state?.state === 'busy-elsewhere') {
