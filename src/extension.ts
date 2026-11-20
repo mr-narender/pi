@@ -22,7 +22,7 @@ import { promptChatName, trackSessionName } from './commands/nameCommand';
 import { initSharedPiHost, disposeSharedPiHost } from './process/sharedPiHost';
 import {
   detachedRuntimeBaseDir,
-  stopBackgroundRuntimes,
+  stopBackgroundRuntimesAndWait,
 } from './process/detachedRuntime/stopRuntimes';
 import { disposeParkedDetachedDrafts } from './process/supervisor';
 import { TurnReview } from './review/turnReview';
@@ -1371,10 +1371,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // the per-user registry. Idle ones also exit on their own after idleMinutes.
   registrations.set('piRpc.stopBackgroundRuntimes', async () => {
     const baseDir = detachedRuntimeBaseDir(context.globalStorageUri.fsPath);
-    const { stopped } = stopBackgroundRuntimes(baseDir);
+    const { stopped, forced } = await stopBackgroundRuntimesAndWait(baseDir);
+    const detail = forced > 0 ? ` (${forced} force-killed)` : '';
     void vscode.window.showInformationMessage(
       stopped > 0
-        ? `Stopped ${stopped} background Pi runtime${stopped === 1 ? '' : 's'}.`
+        ? `Stopped ${stopped} background Pi runtime${stopped === 1 ? '' : 's'}${detail}.`
         : 'No background Pi runtimes are running.'
     );
   });

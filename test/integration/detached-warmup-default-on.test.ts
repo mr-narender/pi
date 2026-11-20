@@ -7,7 +7,7 @@ import { piLaunchEnvironment } from '../../src/process/piLauncher';
 import { createNativeFixture, nativeSdkHostPlan } from '../helpers/nativeFixture';
 import {
   detachedRuntimeBaseDir,
-  stopBackgroundRuntimes,
+  stopBackgroundRuntimesAndWait,
 } from '../../src/process/detachedRuntime/stopRuntimes';
 
 // Integration tests for warm-start parity when detachedRuntime.enabled defaults ON.
@@ -207,7 +207,7 @@ test(
       assert.equal(entries[0]!.sdkRoot, sdkRoot);
     } finally {
       try {
-        stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+        await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
       } catch {
         /* ignore */
       }
@@ -219,6 +219,7 @@ test(
 test('second New Chat adopts a parked detached draft', { skip: SKIP, timeout: 90000 }, async () => {
   const fixture = await createNativeFixture('compact');
   const globalStorage = shortTmp();
+  let disposeParked: (() => void) | undefined;
   try {
     const plan = await nativeSdkHostPlan(fixture, 'shared');
     const planEnv = plan.env as NodeJS.ProcessEnv;
@@ -262,6 +263,7 @@ test('second New Chat adopts a parked detached draft', { skip: SKIP, timeout: 90
     );
 
     const { PiProcessSupervisor, disposeParkedDetachedDrafts } = mod.exports;
+    disposeParked = disposeParkedDetachedDrafts;
     const logLines: string[] = [];
     const logger = {
       info: (msg: string) => logLines.push(msg),
@@ -312,7 +314,12 @@ test('second New Chat adopts a parked detached draft', { skip: SKIP, timeout: 90
     await sup2.stop();
   } finally {
     try {
-      stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+      disposeParked?.();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
     } catch {
       /* ignore */
     }
@@ -326,6 +333,7 @@ test(
   async () => {
     const fixture = await createNativeFixture('compact');
     const globalStorage = shortTmp();
+    let disposeParked: (() => void) | undefined;
     try {
       const plan = await nativeSdkHostPlan(fixture, 'shared');
       const planEnv = plan.env as NodeJS.ProcessEnv;
@@ -364,6 +372,7 @@ test(
       );
 
       const { PiProcessSupervisor, disposeParkedDetachedDrafts } = mod.exports;
+      disposeParked = disposeParkedDetachedDrafts;
       const logLines: string[] = [];
       const logger = {
         info: (msg: string) => logLines.push(msg),
@@ -415,7 +424,12 @@ test(
       await sup2.stop();
     } finally {
       try {
-        stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+        disposeParked?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
       } catch {
         /* ignore */
       }
@@ -514,7 +528,7 @@ test(
       await sup.stop();
     } finally {
       try {
-        stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+        await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
       } catch {
         /* ignore */
       }
