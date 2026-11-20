@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { pidAlive } from './registry';
 
 // Session file lock: prevents two detached runtimes from opening the same
@@ -55,6 +56,7 @@ export function readSessionLock(
 
 /** Write a session lock file (atomic enough for single-host use). */
 export function writeSessionLock(sessionFile: string, info: SessionLockInfo): void {
+  mkdirSync(dirname(sessionFile), { recursive: true });
   writeFileSync(sessionLockPath(sessionFile), JSON.stringify(info), { mode: 0o600 });
 }
 

@@ -60,6 +60,7 @@ interface ParkedDetachedDraft {
   channelKey: string;
   /** Runtime process pid for liveness checks. */
   runtimePid: number;
+  runtimeId: string;
 }
 
 /** Map key: `${cwd}\0${envKey}` */
@@ -214,6 +215,8 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
   private usingDetached = false;
   /** Session file path for session lock release on stop. */
   private detachedSessionFile: string | undefined;
+  /** Runtime this supervisor is attached to, for the session file lock. */
+  private detachedRuntime: { runtimeId: string; pid: number } | undefined;
 
   public constructor(
     private readonly folder: vscode.WorkspaceFolder,
@@ -450,6 +453,40 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     await this.stopClient();
   }
 
+  /**
+   * Record the session file this detached session writes to and lock it. A
+   * chat started as "(new)" only learns its file after the first reconcile, so
+   * without this another runtime could open the same file concurrently.
+   */
+  public noteSessionFile(sessionFile: string | undefined): void {
+    const runtime = this.detachedRuntime;
+    if (!this.usingDetached || !runtime || !sessionFile) return;
+    if (this.detachedSessionFile === sessionFile) return;
+    const lock = readSessionLock(sessionFile);
+    if (lock && lock.runtimeId !== runtime.runtimeId) {
+      this.logger.warn(
+        `Session file ${sessionFile} is already locked by runtime ${lock.runtimeId} (pid ${lock.pid})`
+      );
+      return;
+    }
+    const previous = this.detachedSessionFile;
+    if (previous && readSessionLock(previous)?.runtimeId === runtime.runtimeId) {
+      releaseSessionLock(previous);
+    }
+    try {
+      writeSessionLock(sessionFile, {
+        runtimeId: runtime.runtimeId,
+        pid: runtime.pid,
+        timestamp: Date.now(),
+      });
+      this.detachedSessionFile = sessionFile;
+    } catch (error) {
+      this.logger.warn(
+        `Could not write session lock for ${sessionFile}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   private async stopClient(): Promise<void> {
     const piProcess = this.piProcess;
     const detachedConn = this.detachedConnection;
@@ -457,10 +494,14 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     this.transport = undefined;
     this.client = undefined;
     this.piProcess = undefined;
+    const runtimeId = this.detachedRuntime?.runtimeId;
     this.detachedConnection = undefined;
     this.detachedSessionFile = undefined;
-    // Release the session file lock when explicitly closing.
-    if (sessionFile) releaseSessionLock(sessionFile);
+    this.detachedRuntime = undefined;
+    // Release the session file lock when explicitly closing (only our own lock).
+    if (sessionFile && readSessionLock(sessionFile)?.runtimeId === runtimeId) {
+      releaseSessionLock(sessionFile);
+    }
     if (!piProcess) {
       return;
     }
@@ -544,6 +585,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           this.generation += 1;
           this.detachedConnection = draft.conn;
           this.usingDetached = true;
+          this.detachedRuntime = { runtimeId: draft.runtimeId, pid: draft.runtimePid };
           const client = this.attachClient(draft.handle, 'detached runtime');
           options?.onClient?.(client);
           this.logger.info(
@@ -592,6 +634,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
         this.detachedConnection = holder.conn;
         this.usingDetached = true;
         this.detachedSessionFile = existingSessionPath;
+        this.detachedRuntime = { runtimeId: holder.entry.id, pid: holder.entry.pid };
         const client = this.attachClient(holder.handle, 'detached runtime');
         options?.onClient?.(client);
         this.logger.info(
@@ -707,7 +750,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           conn.dispose();
           throw Object.assign(
             new Error(
-              `Session file is held by another runtime (${lock.runtimeId}, pid ${lock.pid})`
+              `This chat is open in another VS Code window (runtime ${lock.runtimeId}, pid ${lock.pid})`
             ),
             { code: 'SDK_SESSION_LOCKED' }
           );
@@ -750,6 +793,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     this.detachedConnection = conn;
     this.usingDetached = true;
     this.detachedSessionFile = existingSessionPath;
+    this.detachedRuntime = { runtimeId: entry!.id, pid: entry!.pid };
     const client = this.attachClient(handle, 'detached runtime');
     options?.onClient?.(client);
     elapsed('attached');
@@ -897,6 +941,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
         args,
         channelKey,
         runtimePid: entry.pid,
+        runtimeId: entry.id,
       };
       parkedDetachedDrafts.set(draftKey, draft);
       // Evict the draft immediately if the runtime connection drops.

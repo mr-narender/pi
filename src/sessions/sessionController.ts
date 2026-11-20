@@ -1146,7 +1146,8 @@ export class SessionController implements vscode.Disposable {
           error instanceof Error &&
           'code' in error &&
           (error.code === 'SDK_STARTUP_MODEL_AMBIGUOUS' ||
-            error.code === 'SDK_SESSION_BUSY_ELSEWHERE')
+            error.code === 'SDK_SESSION_BUSY_ELSEWHERE' ||
+            error.code === 'SDK_SESSION_LOCKED')
         )
           break;
         // After a detached re-attach failure (e.g. 'session not open'), a small
@@ -1402,6 +1403,8 @@ export class SessionController implements vscode.Disposable {
         `tree=${this.state.tree.length} (lazy), ` +
         `session=${this.state.state.sessionFile ?? '(none)'}`
     );
+    // Lock the session file for this detached runtime (new chats learn it here).
+    this.supervisor.noteSessionFile(this.state.state.sessionFile);
     // We now hold the full active-branch transcript at the current file size.
     await this.syncFileReadOffset();
     // (Re)arm the native file watcher so terminal (TUI) appends to THIS session
