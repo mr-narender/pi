@@ -13,10 +13,10 @@ import { RpcTransport } from '../../src/rpc/transport';
 for (const mode of ['shared', 'dedicated'] as const) {
   for (const offline of [false, true]) {
     test(
-      `Pi 1.2.0 ${mode}: OpenRouter discovery ${offline ? 'offline' : 'on demand'}`,
+      `supported Pi SDK ${mode}: OpenRouter discovery ${offline ? 'offline' : 'on demand'}`,
       { timeout: 20000 },
       async () => {
-        assert.equal((await resolveNativeCli()).version, '1.2.0');
+        assert.match((await resolveNativeCli()).version, /^1\./);
         const fixture = await createNativeFixture('openrouter');
         let child: Awaited<ReturnType<typeof spawnNativeSdkHost>>['child'] | undefined;
         let transport: RpcTransport | undefined;

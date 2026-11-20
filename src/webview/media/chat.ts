@@ -89,6 +89,7 @@ root?.addEventListener('contextmenu', (event) => event.preventDefault());
 type ActivityTab = 'output' | 'sources' | 'agents';
 const activityTabs = new Map<string, ActivityTab>();
 const disclosureOpen = new Map<string, boolean>();
+let renderedToolDetails: boolean | undefined;
 let renderedDisclosureSession: string | undefined;
 function selectActivityTab(panel: HTMLElement, tab: ActivityTab): void {
   const selectedTab = panel.querySelector(`[data-activity-tab="${tab}"]`) ? tab : 'output';
@@ -2036,6 +2037,18 @@ function renderNow(snapshot: WebviewSnapshot): void {
     const el = document.getElementById(id) as HTMLDetailsElement | null;
     if (el) el.open = open;
   }
+  // Apply the global default to new calls, preserving per-call choices until
+  // the global mode changes. Reasoning disclosures have their own toggle.
+  const showToolDetails = snapshot.showToolDetails === true;
+  for (const el of document.querySelectorAll<HTMLDetailsElement>(
+    '#messages .tl-tool > details, #messages .tl-result > details, #messages .activity-read-group > details'
+  )) {
+    if (renderedToolDetails !== showToolDetails || !disclosureOpen.has(el.id)) {
+      el.open = showToolDetails;
+      disclosureOpen.set(el.id, el.open);
+    }
+  }
+  renderedToolDetails = showToolDetails;
   for (const id of openMenus) {
     const el = document.getElementById(id) as HTMLDetailsElement | null;
     if (el) el.open = true;
@@ -2664,13 +2677,35 @@ function renderNow(snapshot: WebviewSnapshot): void {
   for (const button of Array.from(root.querySelectorAll<HTMLButtonElement>('.msg-copy'))) {
     bindOnce(button, 'click', () => {
       const article = button.closest('.message-card');
-      const hasRawPayload = button.dataset.copyRaw !== undefined;
-      const text =
+      const sourceText =
         button.dataset.copyRaw ??
-        article?.querySelector('.tl-answer .tl-body')?.textContent ??
-        article?.querySelector('.message-body')?.textContent ??
-        article?.querySelector('.tl-body')?.textContent ??
-        '';
+        currentSnapshot?.messages.find(
+          (message) => message.id === article?.getAttribute('data-mid')
+        )?.text;
+      const hasRawPayload = sourceText !== undefined;
+      const body =
+        article?.querySelector('.tl-answer .tl-body') ??
+        article?.querySelector('.message-body') ??
+        article?.querySelector('.tl-body');
+      const fallback = !hasRawPayload
+        ? (body?.cloneNode(true) as HTMLElement | undefined)
+        : undefined;
+      if (fallback && body) {
+        const originals = body.querySelectorAll('*');
+        fallback.querySelectorAll('*').forEach((node, index) => {
+          const original = originals[index]!;
+          const style = getComputedStyle(original);
+          if (
+            original.matches(
+              'button, input, select, textarea, [hidden], [aria-hidden="true"], script, style'
+            ) ||
+            style.display === 'none' ||
+            style.visibility === 'hidden'
+          )
+            node.remove();
+        });
+      }
+      const text = sourceText ?? fallback?.textContent ?? '';
       if (!text.trim()) {
         return;
       }
@@ -3130,12 +3165,14 @@ function structureSignature(s: WebviewSnapshot): string {
     `|q${(s.queue?.steering.length ?? 0) + (s.queue?.followUp.length ?? 0)}` +
     `|a${JSON.stringify(s.approvals?.map((item) => [item.requestKey, item.id, item.method, item.responseState, item.responseError, item.draftRevision, item.draftResetSeq]))}|p${s.pendingContextItems.length}/${s.pendingImages.length}` +
     `|extensionDraftAck${JSON.stringify(s.extensionUiDraftAck ?? null)}` +
-    `|reported${JSON.stringify(s.activity?.agents ?? [])}` +
+    `|reported${JSON.stringify([s.activity?.agents ?? [], s.activity?.delegatedTools ?? []])}` +
     `|runtimeActivity${JSON.stringify([s.activity?.tools, s.activity?.output, s.activity?.statuses, s.activity?.files])}` +
     `|addons${JSON.stringify([s.statuses, s.widgets, s.approvals?.filter((item) => item.method === 'unsupported_ui')])}` +
     `|modelTools${JSON.stringify([s.modelTools?.requestId, s.modelTools?.status, s.modelTools?.revision, s.modelTools?.message])}` +
     `|mcpStatus${JSON.stringify(s.mcpStatus ?? null)}` +
-    `|outbox${JSON.stringify([s.outbox?.key, s.outbox?.notice, s.outbox?.readOnly, s.outbox?.items.map((item) => [item.id, item.revision, item.status])])}|outboxAck${JSON.stringify(s.outboxAck ?? null)}`
+    `|outbox${JSON.stringify([s.outbox?.key, s.outbox?.notice, s.outbox?.readOnly, s.outbox?.items.map((item) => [item.id, item.revision, item.status])])}|outboxAck${JSON.stringify(s.outboxAck ?? null)}` +
+    `|showToolDetails${s.showToolDetails ? 1 : 0}|showThinking${s.showThinking ? 1 : 0}` +
+    `|interruptedTurn${JSON.stringify([s.interruptedTurn ?? null, !!s.draft])}`
   );
 }
 

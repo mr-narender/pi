@@ -6,11 +6,33 @@ import { join } from 'node:path';
 import type { PiRpcSettings } from '../../src/config/settings';
 import {
   detectPathPi,
+  invalidatePiLaunchCache,
   resolvePiLaunch,
   selectedSdkRoot,
   setManagedPiCliPath,
   setBundledPiCliPath,
 } from '../../src/process/piLauncher';
+
+test('launch discovery cache invalidates without retaining a launch environment', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pi-launch-cache-')));
+  const settings = { piSource: 'external', executable: join(root, 'cli.js') } as PiRpcSettings;
+  const metadata = join(root, 'package.json');
+  const pkg = { name: '@earendil-works/pi-coding-agent', version: '1.3.0', bin: { pi: 'cli.js' } };
+  try {
+    writeFileSync(settings.executable, '', { mode: 0o555 });
+    writeFileSync(metadata, JSON.stringify(pkg));
+    assert.equal(resolvePiLaunch(settings, { PATH: '', MARKER: 'first' }, root).sdkRoot, root);
+    writeFileSync(metadata, JSON.stringify({ ...pkg, version: '2.0.0' }));
+    const cached = resolvePiLaunch(settings, { PATH: '', MARKER: 'second' }, root);
+    assert.equal(cached.sdkRoot, root);
+    assert.equal(cached.env.MARKER, 'second', 'only filesystem discovery is cached');
+    invalidatePiLaunchCache();
+    assert.equal(resolvePiLaunch(settings, { PATH: '' }, root).sdkRoot, undefined);
+  } finally {
+    invalidatePiLaunchCache();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('launch provenance: current PATH, async drift and explicit/managed/worker/wrapper matrix', async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pi-launch-metadata-')));
@@ -35,8 +57,8 @@ test('launch provenance: current PATH, async drift and explicit/managed/worker/w
     return realpathSync(root);
   };
   try {
-    const a = sdk('a', '1.2.0');
-    const b = sdk('b', '1.3.0');
+    const a = sdk('a', '1.3.0');
+    const b = sdk('b', '1.5.2');
     process.env.PATH = join(a, 'bin');
     assert.equal(detectPathPi()?.packageRoot, a);
     process.env.PATH = join(b, 'bin');
@@ -102,7 +124,7 @@ test('launch provenance: current PATH, async drift and explicit/managed/worker/w
     const rejected = resolvePiLaunch(settings, { PATH: '' }, dir);
     assert.equal(rejected.usingBundled, false, 'unsupported managed SDK must never launch');
     assert.equal(rejected.sdkRoot, undefined);
-    const future = sdk('future', '1.4.0');
+    const future = sdk('future', '2.0.0');
     settings.executable = join(future, 'bin/pi');
     const futureSelected = resolvePiLaunch(settings, { PATH: join(b, 'bin') }, dir);
     assert.equal(futureSelected.command, join(future, 'dist/cli.js'));

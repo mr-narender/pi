@@ -8,7 +8,10 @@ async function deleteCommandFixture() {
   const start = source.indexOf("  registrations.set('piRpcInternal.deleteSession'");
   const end = source.indexOf("  registrations.set('piRpcInternal.refreshRecentSessions'", start);
   assert.ok(start >= 0 && end > start);
-  const compiled = await transform(source.slice(start, end), { loader: 'ts' });
+  const helper = readFileSync('src/sessions/deleteSessionFile.ts', 'utf8')
+    .replace(/^import .*;$/m, '')
+    .replace('export async function', 'async function');
+  const compiled = await transform(helper + source.slice(start, end), { loader: 'ts' });
   const events: string[] = [];
   let close: () => Promise<void> = async () => {
     events.push('close');
@@ -72,4 +75,16 @@ test('delete command removes cache only after file delete succeeds', async () =>
   const fixture = await deleteCommandFixture();
   await fixture.run();
   assert.deepEqual(fixture.events.slice(0, 4), ['close', 'stop', 'delete', 'remove-cache']);
+});
+
+test('deleting an allocated unwritten draft closes it and removes its row without an error', async () => {
+  for (const code of ['ENOENT', 'FileNotFound']) {
+    const fixture = await deleteCommandFixture();
+    fixture.setDelete(async () => {
+      throw Object.assign(new Error('not saved'), { code });
+    });
+    await fixture.run();
+    assert.deepEqual(fixture.events.slice(0, 3), ['close', 'stop', 'remove-cache']);
+    assert.ok(fixture.events.includes('refresh-views'));
+  }
 });

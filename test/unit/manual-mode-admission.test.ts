@@ -57,6 +57,7 @@ async function fixture() {
   owner.supervisor = {
     currentGeneration: 1,
     currentClient: {
+      getCommands: async () => ({ commands: [{ name: 'pi-vscode-approval-gate' }] }),
       prompt: async (...args: unknown[]) => {
         calls.push(args);
         return { disposition: 'started' };

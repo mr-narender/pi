@@ -1,0 +1,8 @@
+{
+  "name": "pi-ci-sdk-15",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2"
+  }
+}

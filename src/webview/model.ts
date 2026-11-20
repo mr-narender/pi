@@ -681,6 +681,7 @@ export function createWebviewSnapshot(
     preview: extra.composer.preview,
     acceptedSendSnapshot: extra.composer.acceptedSendSnapshot,
     recovery: extra.composer.recovery,
+    interruptedTurn: detectInterruptedControllerTurn(state),
     isTrusted: extra.isTrusted,
     folders: extra.folders,
     workingAnimation: extra.presentation?.workingAnimation,
@@ -691,6 +692,170 @@ export function createWebviewSnapshot(
         : undefined,
     typewriterSpeed: extra.presentation?.typewriterSpeed,
   };
+}
+
+/**
+ * Detect an interrupted turn after reconcile: the last message is a user prompt
+ * with no assistant reply, or the turn ends before a final assistant answer.
+ * Exported for unit tests.
+ */
+export function detectInterruptedControllerTurn(state: ControllerState) {
+  return detectInterruptedTurn(
+    state.messages,
+    state.connectionState,
+    state.state.isStreaming === true,
+    Array.isArray(state.state.shutdownInterruptionEntries)
+      ? (state.state.shutdownInterruptionEntries as JsonObject[])
+      : state.entries,
+    state.leafId
+  );
+}
+
+export function detectInterruptedTurn(
+  messages: readonly JsonObject[],
+  connectionState: ControllerState['connectionState'],
+  isStreaming: boolean,
+  entries: readonly JsonObject[] = [],
+  leafId?: string | null
+): WebviewSnapshot['interruptedTurn'] {
+  // Only detect when idle (not actively streaming or connecting).
+  if (isStreaming || connectionState !== 'ready') return undefined;
+  const userText = (message: JsonObject): string | undefined => {
+    if (typeof message.content === 'string') {
+      return (
+        (parseCapturedContextEnvelope(message.content, '')?.displayText ?? message.content) ||
+        undefined
+      );
+    }
+    if (!Array.isArray(message.content)) return undefined;
+    return (
+      message.content
+        .flatMap((block) =>
+          block &&
+          typeof block === 'object' &&
+          !Array.isArray(block) &&
+          block.type === 'text' &&
+          typeof block.text === 'string'
+            ? [parseCapturedContextEnvelope(block.text, '')?.displayText ?? block.text]
+            : []
+        )
+        .join('\n') || undefined
+    );
+  };
+  if (messages.length === 0) return undefined;
+  const last = messages[messages.length - 1];
+  if (!last) return undefined;
+  // Case 1: last message is user → no assistant reply received.
+  const canResend = (message: JsonObject): boolean => {
+    if (Array.isArray(message.attachments) && message.attachments.length) return false;
+    if (typeof message.content === 'string') return !message.content.includes(CONTEXT_OPEN);
+    return (
+      Array.isArray(message.content) &&
+      message.content.every(
+        (block) =>
+          block &&
+          typeof block === 'object' &&
+          !Array.isArray(block) &&
+          block.type === 'text' &&
+          typeof block.text === 'string' &&
+          !block.text.includes(CONTEXT_OPEN)
+      )
+    );
+  };
+  if (last.role === 'user') {
+    return { lastUserMessage: userText(last), canResend: canResend(last), kind: 'noReply' };
+  }
+  // A tool may legitimately end the turn (terminate / finishTurn: end).
+  // Only unmatched calls, not the absence of a final prose answer, imply a cut-off.
+  let turnStart = messages.length - 1;
+  while (turnStart >= 0 && messages[turnStart]?.role !== 'user') turnStart--;
+  const turn = messages.slice(turnStart + 1);
+  const assistant = [...turn].reverse().find((message) => message.role === 'assistant');
+  const resultIds = new Set(
+    turn
+      .filter((message) => ['toolResult', 'tool_result', 'tool'].includes(String(message.role)))
+      .map((message) => message.toolCallId)
+  );
+  const unmatchedCalls = turn.some(
+    (message) =>
+      message.role === 'assistant' &&
+      message.stopReason === 'toolUse' &&
+      Array.isArray(message.content) &&
+      message.content.some(
+        (block) =>
+          block &&
+          typeof block === 'object' &&
+          !Array.isArray(block) &&
+          block.type === 'toolCall' &&
+          (typeof block.id !== 'string' || !resultIds.has(block.id))
+      )
+  );
+  if (
+    (assistant && !assistant.stopReason) ||
+    unmatchedCalls ||
+    (assistant?.stopReason === 'aborted' && hasShutdownMarker(entries, leafId, assistant))
+  ) {
+    // Find the user message that triggered this turn.
+    for (let i = messages.length - 2; i >= 0; i--) {
+      if (messages[i]?.role === 'user') {
+        return {
+          lastUserMessage: userText(messages[i]!),
+          canResend: canResend(messages[i]!),
+          kind: 'incompleteReply',
+        };
+      }
+    }
+    return { kind: 'incompleteReply' };
+  }
+  return undefined;
+}
+
+/** Custom entries are metadata, not transcript messages; inspect only the active path. */
+function hasShutdownMarker(
+  entries: readonly JsonObject[],
+  leafId: string | null | undefined,
+  assistant: JsonObject
+): boolean {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  let cursor = leafId === undefined ? entries.at(-1)?.id : leafId;
+  const seen = new Set();
+  let marked = false;
+  while (typeof cursor === 'string' && !seen.has(cursor)) {
+    seen.add(cursor);
+    const entry = byId.get(cursor);
+    if (!entry) return false;
+    if (entry.type === 'custom' && entry.customType === 'vscode-pi.turn-interrupted') {
+      const data = entry.data;
+      if (
+        data &&
+        typeof data === 'object' &&
+        !Array.isArray(data) &&
+        ['host-shutdown', 'signal', 'stdin-closed'].includes(String(data.reason))
+      )
+        marked = true;
+    }
+    if (entry.type === 'message') {
+      const message = entry.message;
+      if (
+        message &&
+        typeof message === 'object' &&
+        !Array.isArray(message) &&
+        (message.role === 'assistant' || message.role === 'user')
+      ) {
+        // Entries can lag live messages; never apply an older turn's marker.
+        return (
+          marked &&
+          ((message.timestamp !== undefined &&
+            message.timestamp === assistant.timestamp &&
+            message.role === assistant.role &&
+            message.stopReason === assistant.stopReason) ||
+            JSON.stringify(message) === JSON.stringify(assistant))
+        );
+      }
+    }
+    cursor = entry.parentId;
+  }
+  return false;
 }
 
 /** Report each response's own checklist without inferring task execution. */

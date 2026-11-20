@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { PassThrough, Writable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
@@ -38,6 +39,7 @@ interface LoggerLike {
 // Electron's Node lacks module.enableCompileCache, so boots stayed 13s+).
 // A separate process schedules independently, and system Node ≥22 gives us the
 // V8 compile cache that turns later boots into bytecode loads.
+const immutableEnvKeys = new WeakMap<NodeJS.ProcessEnv, string>();
 let cachedNodeBin: string | null | undefined;
 function findSystemNode(): string | undefined {
   if (cachedNodeBin !== undefined) {
@@ -88,14 +90,30 @@ class HostWorkerConn {
     private readonly onDead: (conn: HostWorkerConn) => void,
     private readonly launchCwd?: string,
     private readonly reusable = true
-  ) {}
+  ) {
+    this.envKey = HostWorkerConn.computeEnvKey(baseEnv);
+  }
 
-  public matchesEnvironment(env: NodeJS.ProcessEnv, cwd?: string): boolean {
-    return (
-      this.reusable &&
-      this.launchCwd === cwd &&
-      JSON.stringify(this.baseEnv) === JSON.stringify(env)
-    );
+  /** Stable environment hash, computed once at construction; never log raw values. */
+  private readonly envKey: string;
+
+  public static computeEnvKey(env: NodeJS.ProcessEnv): string {
+    const cached = immutableEnvKeys.get(env);
+    if (cached) return cached;
+    // Extensions and providers can consume arbitrary variables, including credentials.
+    const entries = Object.keys(env)
+      .sort()
+      .filter((key) => env[key] !== undefined)
+      .map((key) => [key, env[key]]);
+    const key = createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+    // Launch plans freeze their captured environments. Mutable caller environments
+    // must be rehashed so an in-place credential/settings change cannot reuse a worker.
+    if (Object.isFrozen(env)) immutableEnvKeys.set(env, key);
+    return key;
+  }
+
+  public matchesEnvironmentKey(envKey: string, cwd?: string): boolean {
+    return this.reusable && this.launchCwd === cwd && this.envKey === envKey;
   }
 
   public get sessionCount(): number {
@@ -272,8 +290,13 @@ export class SharedPiHost {
   private piRootPromise: Promise<string> | undefined;
   private readonly maxWorkers: number;
   // Prewarmed draft sessions parked per cwd: "New Chat" adopts one instantly.
-  private readonly parked = new Map<string, { handle: PiProcessHandle; conn: HostWorkerConn }>();
-  private prewarmTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly parked = new Map<
+    string,
+    { handle: PiProcessHandle; conn: HostWorkerConn; info: SdkSessionOpen }
+  >();
+  private readonly prewarmTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly prewarmLaunches = new Map<string, SdkSessionOpen>();
+  private disposed = false;
 
   public constructor(
     private readonly hostScript: string,
@@ -310,6 +333,7 @@ export class SharedPiHost {
       return this.spawnConn(root, info.env ?? this.baseEnv, info.cwd, false);
     }
     const env = info?.env ?? this.baseEnv;
+    const envKey = HostWorkerConn.computeEnvKey(env);
     if (!info?.sdkRoot) {
       this.piRootPromise ??= this.resolvePiRoot().catch((error: unknown) => {
         this.piRootPromise = undefined;
@@ -318,7 +342,8 @@ export class SharedPiHost {
     }
     const piRoot = info?.sdkRoot ?? (await this.piRootPromise!);
     const live = this.conns.filter(
-      (conn) => !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironment(env, info?.cwd)
+      (conn) =>
+        !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironmentKey(envKey, info?.cwd)
     );
     // NEVER boot a second worker while one is still cold: parallel cold boots
     // contend on CPU (both importing Pi's whole module graph) and can push past
@@ -377,21 +402,27 @@ export class SharedPiHost {
   }
 
   private warmingPool = false;
-  private warmupLaunch?: Pick<SdkSessionOpen, 'cwd' | 'env' | 'sdkRoot'>;
+  private neutralLaunch?: SdkSessionOpen;
+  private readonly pendingWarmups = new Map<
+    string,
+    { prewarmCwd?: string; launch?: SdkSessionOpen }
+  >();
 
   /**
-   * Boot the WHOLE pool at startup — serially (parallel cold boots contend on
-   * CPU), each worker confirmed warm via ping before the next starts. Ends by
-   * parking the prewarmed draft session, so the first New Chat AND the first
-   * parallel burst are both instant. Safe to call once per activation; user
-   * opens arriving mid-warmup simply ride the currently-booting worker.
+   * Warm a compatible pool serially (parallel cold imports contend on CPU).
+   * Neutral sidebar launches only ping workers; chat launches also park a draft.
+   * Queue other folders behind the current warmup, retaining each exact launch.
+   * User opens arriving mid-warmup ride the currently-booting compatible worker.
    */
-  public warmPool(prewarmCwd?: string, launch = this.warmupLaunch): void {
+  public warmPool(prewarmCwd?: string, launch?: SdkSessionOpen): void {
+    if (this.disposed) return;
+    if (prewarmCwd && launch) this.prewarmLaunches.set(prewarmCwd, launch);
+    if (!prewarmCwd && launch) this.neutralLaunch = launch;
     if (this.warmingPool) {
+      this.pendingWarmups.set(launch?.cwd ?? '', { prewarmCwd, launch });
       return;
     }
     this.warmingPool = true;
-    this.warmupLaunch = launch;
     void (async () => {
       try {
         if (!launch?.sdkRoot) {
@@ -402,11 +433,14 @@ export class SharedPiHost {
         }
         const piRoot = launch?.sdkRoot ?? (await this.piRootPromise!);
         const env = launch?.env ?? this.baseEnv;
+        const envKey = HostWorkerConn.computeEnvKey(env);
         const cwd = launch?.cwd;
         let firstWarm = false;
         for (;;) {
+          if (this.disposed) return;
           const live = this.conns.filter(
-            (conn) => !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironment(env, cwd)
+            (conn) =>
+              !conn.fault && conn.piRoot === piRoot && conn.matchesEnvironmentKey(envKey, cwd)
           );
           const cold = live.find((conn) => !conn.warm);
           if (cold) {
@@ -433,33 +467,46 @@ export class SharedPiHost {
         );
       } finally {
         this.warmingPool = false;
+        const next = this.pendingWarmups.entries().next().value;
+        if (next) {
+          this.pendingWarmups.delete(next[0]);
+          this.warmPool(next[1].prewarmCwd, next[1].launch);
+        }
       }
     })();
   }
 
   /** Park a ready draft session for this cwd so the next New Chat is instant. */
   public schedulePrewarm(cwd: string, delayMs = 3000): void {
-    if (this.prewarmTimer || this.parked.has(cwd)) {
+    if (this.disposed || this.prewarmTimers.has(cwd) || this.parked.has(cwd)) {
       return;
     }
-    this.prewarmTimer = setTimeout(() => {
-      this.prewarmTimer = undefined;
-      void this.prewarm(cwd);
+    const launch = this.prewarmLaunches.get(cwd);
+    const timer = setTimeout(() => {
+      this.prewarmTimers.delete(cwd);
+      void this.prewarm(cwd, launch);
     }, delayMs);
-    this.prewarmTimer.unref?.();
+    this.prewarmTimers.set(cwd, timer);
+    timer.unref?.();
   }
 
-  private async prewarm(cwd: string): Promise<void> {
-    if (this.parked.has(cwd)) {
+  private async prewarm(cwd: string, launch = this.prewarmLaunches.get(cwd)): Promise<void> {
+    if (this.disposed || this.parked.has(cwd)) {
       return;
     }
     try {
-      const opened = await this.openSessionRaw({ cwd });
-      if (this.parked.has(cwd)) {
+      // Capture this folder's launch, never the most recently warmed folder's.
+      // Explicit CLI/trust/IDE args must match the next supervisor request.
+      const prewarmInfo: SdkSessionOpen = {
+        ...launch,
+        cwd,
+      };
+      const opened = await this.openSessionRaw(prewarmInfo);
+      if (this.disposed || this.parked.has(cwd)) {
         await opened.handle.stop();
         return;
       }
-      this.parked.set(cwd, opened);
+      this.parked.set(cwd, { ...opened, info: prewarmInfo });
       this.logger.info(`Prewarmed a draft Pi session for ${cwd} (worker #${opened.conn.id})`);
     } catch (error) {
       this.logger.warn(
@@ -478,14 +525,47 @@ export class SharedPiHost {
     openTimeoutMs = 20_000,
     onOpening?: (handle: PiProcessHandle) => void
   ): Promise<PiProcessHandle> {
-    if (!info.sessionFile && !info.args && !info.env && !info.dedicated && !info.sdkRoot) {
+    // Adopt a prewarmed parked session when the request is a default New Chat
+    // (no existing session file, not dedicated) and the parked session's
+    // sdkRoot + env match (the keys that affect runtime behaviour).
+    if (!info.sessionFile && !info.dedicated) {
       const parked = this.parked.get(info.cwd);
-      if (parked && !parked.conn.fault) {
-        this.parked.delete(info.cwd);
-        this.schedulePrewarm(info.cwd);
-        this.logger.info(`Adopted prewarmed Pi session for ${info.cwd}`);
-        onOpening?.(parked.handle);
-        return parked.handle;
+      // Reserve synchronously: SDK resolution may yield to another New Chat.
+      if (parked) this.parked.delete(info.cwd);
+      let adopted = false;
+      let stale = false;
+      try {
+        if (parked) {
+          const latest = this.prewarmLaunches.get(info.cwd);
+          const matches = (launch: SdkSessionOpen): boolean =>
+            JSON.stringify(launch.args ?? ['--mode', 'rpc', '--no-approve']) ===
+              JSON.stringify(parked.info.args ?? ['--mode', 'rpc', '--no-approve']) &&
+            (launch.sdkRoot === undefined || launch.sdkRoot === parked.conn.piRoot) &&
+            parked.conn.matchesEnvironmentKey(
+              HostWorkerConn.computeEnvKey(launch.env ?? this.baseEnv),
+              info.cwd
+            );
+          stale =
+            !!parked.conn.fault || !matches(info) || (latest !== undefined && !matches(latest));
+          if (!stale) {
+            stale = parked.conn.piRoot !== (info.sdkRoot ?? (await this.resolvePiRoot()));
+          }
+          if (!stale) {
+            adopted = true;
+            this.schedulePrewarm(info.cwd);
+            this.logger.info(`Adopted prewarmed Pi session for ${info.cwd}`);
+            onOpening?.(parked.handle);
+            return parked.handle;
+          }
+        }
+      } finally {
+        if (parked && !adopted) {
+          if (stale) {
+            void parked.handle.stop();
+          } else if (!this.disposed && !this.parked.has(info.cwd)) {
+            this.parked.set(info.cwd, parked);
+          }
+        }
       }
     }
     return (await this.openSessionRaw(info, openTimeoutMs, onOpening)).handle;
@@ -595,10 +675,12 @@ export class SharedPiHost {
   }
 
   public dispose(): void {
-    if (this.prewarmTimer) {
-      clearTimeout(this.prewarmTimer);
-      this.prewarmTimer = undefined;
-    }
+    this.disposed = true;
+    for (const timer of this.prewarmTimers.values()) clearTimeout(timer);
+    this.prewarmTimers.clear();
+    this.prewarmLaunches.clear();
+    this.neutralLaunch = undefined;
+    this.pendingWarmups.clear();
     this.parked.clear();
     for (const conn of [...this.conns]) {
       conn.terminate();
@@ -637,7 +719,8 @@ export class SharedPiHost {
       }
     }
     if (recycled > 0) {
-      this.warmPool();
+      if (this.neutralLaunch) this.warmPool(undefined, this.neutralLaunch);
+      else for (const [cwd, launch] of this.prewarmLaunches) this.warmPool(cwd, launch);
     }
     return { recycled, stillBusy };
   }

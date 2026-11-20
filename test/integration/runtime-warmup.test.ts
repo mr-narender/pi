@@ -12,7 +12,7 @@ import { RpcClient } from '../../src/rpc/client';
 import { RpcTransport } from '../../src/rpc/transport';
 import { createNativeFixture, nativeSdkHostPlan } from '../helpers/nativeFixture';
 
-test('activation passes the workspace launch snapshot to runtime-only warmup', async () => {
+test('activation initializes the shared host after policy sync without resolving a workspace launch', async () => {
   const built = await build({
     entryPoints: ['src/extension.ts'],
     bundle: true,
@@ -40,7 +40,6 @@ test('activation passes the workspace launch snapshot to runtime-only warmup', a
     launchShell: '/owned/shell',
     offline: true,
   };
-  let launch: any;
   let ideExtension: string | undefined;
   let warmArgs: any[] | undefined;
   const activationOrder: string[] = [];
@@ -73,8 +72,7 @@ test('activation passes the workspace launch snapshot to runtime-only warmup', a
       usablePathPiRoot: () => '/owned/sdk',
       isSupportedPiSdkVersion: () => true,
       piLaunchEnvironment,
-      resolvePiLaunch: (_settings: unknown, env: any, cwd: string) =>
-        (launch = { sdkRoot: '/owned/sdk', env, cwd }),
+      resolvePiLaunch: () => assert.fail('activation must not resolve any workspace launch'),
     },
     './process/piManaged': {
       managedPiCliPath: () => '/owned/managed/pi',
@@ -143,21 +141,13 @@ test('activation passes the workspace launch snapshot to runtime-only warmup', a
   releaseGate();
   await activating;
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(activationOrder, ['gate-start', 'gate-ready', 'host-init', 'warm']);
+  assert.deepEqual(activationOrder, ['gate-start', 'gate-ready', 'host-init']);
   assert.equal(ideExtension, join('/owned/extension', 'resources', 'pi-vscode-ide.mjs'));
-  assert.ok(
-    warmArgs && warmArgs[1] === launch,
-    'activation must pass the exact resolved launch snapshot'
-  );
-  assert.equal(warmArgs[0], undefined, 'activation does not create a parked draft');
-  assert.equal(launch.cwd, '/owned/workspace');
-  assert.equal(launch.env.PI_TELEMETRY, '0');
-  assert.equal(launch.env.PI_OFFLINE, '1');
-  assert.equal(launch.env.PI_LAUNCH_SHELL, '/owned/shell');
+  assert.equal(warmArgs, undefined, 'runtime warmup is deferred until a chat surface opens');
 });
 
 test(
-  'activation warmup and live-session switching reuse the same offline SDK worker',
+  'folder warmup parks the second chat and live-session switching reuses the offline SDK worker',
   { timeout: 30000 },
   async (t) => {
     const fixture = await createNativeFixture();
@@ -178,12 +168,16 @@ test(
         warmed = resolve;
       });
       const warnings: string[] = [];
+      let parked = false;
+      let adopted = false;
       host = new SharedPiHost(
         plan.args.at(-1)!,
         { ...env, PI_OFFLINE: '0' },
         {
           info(message) {
             if (message.includes('runtime pool warm')) warmed();
+            if (message.includes('Prewarmed a draft')) parked = true;
+            if (message.includes('Adopted prewarmed')) adopted = true;
           },
           warn(message) {
             warnings.push(message);
@@ -244,7 +238,25 @@ test(
         warmedPool.map(({ id }) => id),
         'first chat must use the activation-warmed worker'
       );
+      host.warmPool(fixture.cwd, {
+        cwd: fixture.cwd,
+        args: [...plan.open.args],
+        env,
+        sdkRoot: plan.env.PI_HOST_PI_ROOT,
+      });
+      const parkDeadline = Date.now() + 10000;
+      while (!parked) {
+        assert.ok(Date.now() < parkDeadline, `Draft did not park: ${warnings.join('\n')}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const sessionsBeforeAdoption = host.poolStatus()[0]!.sessions;
       const b = await open();
+      assert.equal(adopted, true, 'second chat must adopt the exact parked SDK draft');
+      assert.equal(
+        host.poolStatus()[0]!.sessions,
+        sessionsBeforeAdoption,
+        'adoption opens no extra channel'
+      );
       assert.equal(
         host.poolStatus().length,
         1,

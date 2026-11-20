@@ -421,6 +421,8 @@ export function reduceEvent(state: ControllerState, event: RpcEvent): Controller
         name: typeof event.toolName === 'string' ? event.toolName : 'unknown',
         args: asObject(event.args),
         startedAt: Date.now(),
+        parentToolCallId:
+          typeof event.parentToolCallId === 'string' ? event.parentToolCallId : undefined,
       };
       next = {
         ...next,

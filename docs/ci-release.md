@@ -13,7 +13,7 @@ host are reserved for the full runtime gate.
 
 Changes under `src/`, `host/`, `media/`, `resources/`, root `package.json`/`package-lock.json`,
 `.vscodeignore`, `tsconfig.json` or `scripts/build.mjs` run the full non-clean
-build, unit, integration, real Pi, VS Code extension host, host drift and VSIX
+build, unit, integration, real Pi, VS Code extension host and VSIX
 inspection. README, CHANGELOG, NOTICE, LICENSE and new infrastructure paths are
 validation-only. PR scope uses the checked-out head against its base merge-base;
 push scope uses the whole before-to-after range. NUL-delimited Git paths retain
@@ -21,7 +21,7 @@ deletions and both sides of renames. An unavailable baseline conservatively runs
 the full gate with publication disabled. PRs check
 the exact PR head; main checks the exact pushed commit. Fork PR jobs have read-only
 permissions and receive no publishing secret. Actions are pinned to full official
-commit SHAs. Node **26.11.1**, Pi SDKs **1.2.0 and 1.3.0** and VS Code **1.141.0** are pinned.
+commit SHAs. Node **26.11.1**, Pi SDKs **1.3.0 and 1.5.2** and VS Code **1.141.0** are pinned.
 The pinned checkout/setup/artifact actions use their native Node 24 runtimes
 (Actions Runner 2.327.1 or newer), separately from the project's Node version.
 Upload v6 and download v7 retain the immutable named artifact transfer used here.
@@ -36,13 +36,13 @@ The SDK pin is only for testing; product configured-executable/PATH precedence
 and opt-in managed installation are unchanged.
 
 For local native qualification, install both test-only fixtures with
-`npm ci --prefix .github/pi-sdk --install-strategy=nested` and
-`npm ci --prefix .github/pi-sdk-13 --install-strategy=nested`, then run tests with
-`PATH="$PWD/.github/pi-sdk-13/node_modules/.bin:$PATH" npm run test:integration`.
-CI uses that same 1.3.0 PATH selection; backward-compatibility fixtures explicitly
-resolve the separate `.github/pi-sdk` 1.2.0 installation. Neither fixture installs
-or replaces the Pi executable used by the extension. The upstream drift check
-retains the 1.2.0 source pin; its audited RPC source is identical in 1.3.0.
+`npm ci --prefix .github/pi-sdk-13 --install-strategy=nested` and
+`npm ci --prefix .github/pi-sdk-15 --install-strategy=nested`, then run unit and
+integration tests with `PI_TEST_SDK=13`, `PI_TEST_SDK=15`, and `PI_TEST_SDK=path`.
+CI puts the 1.5.2 fixture on PATH for the last selection. Local PATH qualification
+uses the actual installed Pi. Neither fixture replaces the product executable.
+The SDK host uses the public API rather than an RPC-source hash drift gate;
+see [Thin SDK host](thin-sdk-host.md) for the audited exceptions.
 
 Stable Git tags and their GitHub release assets track released versions outside
 the source tree. Runtime main pushes automatically choose the next patch above

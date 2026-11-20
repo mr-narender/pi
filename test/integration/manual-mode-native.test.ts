@@ -25,7 +25,10 @@ test('native Pi loads Manual Mode gate and observes every tool and live toggle w
     const handler = loaded.extensions[0].handlers.get('tool_call')[0];
     const prompts: string[] = [];
     let choice: string | undefined = 'Allow';
+    const sessionManager = {};
     const ctx = {
+      cwd,
+      sessionManager,
       hasUI: true,
       ui: {
         select: async (title: string, options: string[]) => {
@@ -52,12 +55,17 @@ test('native Pi loads Manual Mode gate and observes every tool and live toggle w
     assert.equal((await handler({ toolName: 'bash' }, ctx)).block, true);
     choice = undefined;
     assert.equal((await handler({ toolName: 'write' }, ctx)).block, true, 'cancel blocks');
-    assert.equal((await handler({ toolName: 'read' }, { hasUI: false })).block, true);
+    assert.equal(
+      (await handler({ toolName: 'read' }, { cwd, sessionManager, hasUI: false })).block,
+      true
+    );
     let answer!: (value: string | undefined) => void;
     let settled = false;
     const waiting = handler(
       { toolName: 'write' },
       {
+        cwd,
+        sessionManager,
         hasUI: true,
         ui: {
           select: () =>

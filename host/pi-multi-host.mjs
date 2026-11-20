@@ -1,22 +1,19 @@
 /**
- * RPC mode: Headless operation with JSON stdin/stdout protocol.
+ * Thin multi-session SDK host (Architecture D).
  *
- * Used for embedding the agent in other applications.
- * Receives commands as JSON on stdin, outputs events and responses as JSON on stdout.
+ * Hosts MULTIPLE Pi sessions in ONE process on a SHARED ModelRuntime using only
+ * the public @earendil-works/pi-coding-agent SDK surface. The multiplexed JSONL
+ * {k, d} envelope protocol on stdio is unchanged from the previous forked host
+ * so the extension-side sharedPiHost/RpcTransport layer is unaffected.
  *
- * Protocol:
- * - Commands: JSON objects with `type` field, optional `id` for correlation
- * - Responses: JSON objects with `type: "response"`, `command`, `success`, and optional `data`/`error`
- * - Events: AgentSessionEvent objects streamed as they occur
- * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
+ * SDK imports use the package entry point except the optional llama.cpp builtin
+ * (isolated in llama-builtin.mjs) and pi-ai dynamic thinking-level maps.
+ * Command dispatch still mirrors the CLI RPC adapter; this is not a new protocol.
  */
-// FORK of vendor/pi/dist/modes/rpc/rpc-mode.js, adapted to host MULTIPLE Pi
-// sessions in ONE process on a SHARED ModelRuntime. The per-session command
-// logic (handleCommand, dialogs, extension UI) is preserved verbatim; only the
-// I/O layer changes: global stdin/stdout -> per-session {k, d} envelopes so N
-// sessions multiplex over one stdio pair. Re-sync this file when bumping Pi.
+import { loadLlamaBuiltin } from './llama-builtin.mjs';
 import * as crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { createImportCommands } from './import-commands.mjs';
 import { createAuthCommands } from './auth-commands.mjs';
 import { nativeMcpCommand, readNativeMcpStatus } from './mcp-status.mjs';
@@ -50,26 +47,21 @@ const PI_ROOT =
   fileURLToPath(new URL('../vendor/pi', import.meta.url));
 const metadata = JSON.parse(readFileSync(path.join(PI_ROOT, 'package.json'), 'utf8'));
 validateSdkMetadata(metadata);
-const supportsModelDiscovery = ['1.2.0', '1.3.0'].includes(metadata.version);
-const modelToolsPersistence =
-  metadata.version === '1.3.0'
-    ? 'after-turn'
-    : metadata.version === '1.2.0'
-      ? 'runtime-only'
-      : undefined;
+// All supported versions (>=1.3.0) have model discovery and after-turn persistence.
+const supportsModelDiscovery = true;
+const modelToolsPersistence = 'after-turn';
 const piImport = (rel) => import(pathToFileURL(path.join(PI_ROOT, rel)).href);
 const sdk = await piImport('dist/index.js');
 validateSdkApi(sdk);
-const { resolveModelScopeFromModels } = await piImport('dist/core/model-resolver.js');
-// Use the selected SDK's native dynamic thinking maps, not a GUI approximation.
+// --- Documented internal SDK imports (no public factory available) ---
+// Resolve against the captured catalog, without refreshing credentials/network.
+const resolveModelScopeFromModels = (patterns, models) =>
+  sdk.resolveModelScopeWithDiagnostics(patterns, { getAvailable: async () => models });
 const thinking = await import(
   pathToFileURL(resolveSdkDependencyFile(PI_ROOT, '@earendil-works/pi-ai/dist/models.js')).href
 );
-const { builtInExtensions: nativeBuiltins } = await piImport('dist/extensions/index.js');
-// The public factories supply the CLI's builtin wrappers; llama.cpp has no public
-// factory in 0.99.1, so retain that single audited native builtin entry.
 const builtInExtensions = [
-  nativeBuiltins[0],
+  ...(await loadLlamaBuiltin(PI_ROOT, metadata.version)),
   { name: 'codemode', factory: sdk.createCodemodeExtension(), replaceable: true, builtin: true },
   {
     name: 'tool-search',
@@ -79,6 +71,7 @@ const builtInExtensions = [
   },
   { name: 'mcp', factory: sdk.createMcpExtension(), replaceable: true, builtin: true },
 ];
+// --- End internal imports ---
 const buildRuntimeHost = createStartupAdapter(sdk, {
   resolveModelScopeFromModels,
   builtInExtensions,
@@ -86,12 +79,108 @@ const buildRuntimeHost = createStartupAdapter(sdk, {
   hasTrustRequiringProjectResources: sdk.hasTrustRequiringProjectResources,
 });
 
-const { flushRawStdout, takeOverStdout, waitForRawStdoutBackpressure, writeRawStdout } =
-  await piImport('dist/core/output-guard.js');
-const { killTrackedDetachedChildren } = await piImport('dist/utils/shell.js');
-const { theme, initTheme } = await piImport('dist/modes/interactive/theme/theme.js');
-const { toJsonEvent } = await piImport('dist/modes/json-event.js');
-const { attachJsonlLineReader, serializeJsonLine } = await piImport('dist/modes/rpc/jsonl.js');
+// ── Lightweight replacements for internal SDK utilities ─────────────────
+// These replace imports from dist/core/output-guard.js, dist/utils/shell.js,
+// dist/modes/json-event.js, and dist/modes/rpc/jsonl.js. Command dispatch and UI
+// bridging below still mirror much of rpc-mode.js and require behavioural tests.
+
+// stdout write queue (replaces output-guard.js)
+const rawStdoutWrite = process.stdout.write.bind(process.stdout);
+// Redirect console.log (used by SDK internals) to stderr so it doesn't corrupt JSONL
+process.stdout.write = function (...args) {
+  return process.stderr.write.apply(process.stderr, args);
+};
+let writeTail = Promise.resolve();
+function writeRawStdout(text) {
+  if (!text) return;
+  writeTail = writeTail.then(
+    () =>
+      new Promise((resolve, reject) => {
+        rawStdoutWrite(text, (err) => (err ? reject(err) : resolve()));
+      })
+  );
+  writeTail.catch(() => process.exit(1));
+}
+async function waitForRawStdoutBackpressure() {
+  let tail;
+  do {
+    tail = writeTail;
+    await tail;
+  } while (tail !== writeTail);
+}
+async function flushRawStdout() {
+  await waitForRawStdoutBackpressure();
+}
+
+// JSONL helpers (replaces dist/modes/rpc/jsonl.js)
+function serializeJsonLine(value) {
+  return JSON.stringify(value) + '\n';
+}
+function attachJsonlLineReader(stream, onLine) {
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  const emit = (line) => onLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+  const onData = (chunk) => {
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    let idx;
+    while ((idx = buffer.indexOf('\n')) !== -1) {
+      emit(buffer.slice(0, idx));
+      buffer = buffer.slice(idx + 1);
+    }
+  };
+  const onEnd = () => {
+    buffer += decoder.end();
+    if (buffer) {
+      emit(buffer);
+      buffer = '';
+    }
+  };
+  stream.on('data', onData);
+  stream.on('end', onEnd);
+  return () => {
+    stream.off('data', onData);
+    stream.off('end', onEnd);
+  };
+}
+
+// Event serialization (replaces dist/modes/json-event.js toJsonEvent)
+function toJsonAssistantMessageEvent(event) {
+  if (event.type === 'toolcall_start') {
+    const toolCall = event.partial?.content?.[event.contentIndex];
+    const { partial: _p, ...delta } = event;
+    return toolCall?.type === 'toolCall'
+      ? { ...delta, id: toolCall.id, toolName: toolCall.name }
+      : delta;
+  }
+  if (!('partial' in event)) return event;
+  const { partial: _p, ...delta } = event;
+  return delta;
+}
+function toJsonEvent(event) {
+  if (event.type !== 'message_update') return event;
+  return {
+    type: 'message_update',
+    usage: event.message?.usage,
+    assistantMessageEvent: toJsonAssistantMessageEvent(event.assistantMessageEvent),
+  };
+}
+
+// Theme: use the public initTheme; access via globalThis symbol
+const THEME_KEY = Symbol.for('@earendil-works/pi-coding-agent:theme');
+try {
+  sdk.initTheme(undefined, false);
+} catch {
+  /* falls back to dark */
+}
+const theme = new Proxy(
+  {},
+  {
+    get(_, prop) {
+      const t = globalThis[THEME_KEY];
+      return t ? t[prop] : undefined;
+    },
+  }
+);
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -109,6 +198,9 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     throw failure;
   };
   let activityRevision = 0;
+  let unsettledTurn = false;
+  let explicitlyAborted = false;
+  const SHUTDOWN_ABORT_TIMEOUT_MS = 2000; // Bound abort so the interruption marker is written promptly.
   const widgets = new Set();
   const assertEngineIdle = () => {
     if (recoveryRequired) throw new Error('ENGINE_RECOVERY_REQUIRED');
@@ -262,7 +354,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
   let shutdownRequested = false;
   let shuttingDown = false;
   let initializing = true;
-  const signalCleanupHandlers = [];
+  let activeCommands = 0;
   const cancelPendingDialogs = (reason) => {
     for (const pending of [...pendingExtensionRequests.values()]) pending.cancel(reason);
   };
@@ -502,6 +594,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
       },
       shutdownHandler: () => {
         shutdownRequested = true;
+        setImmediate(() => void checkShutdownRequested());
       },
       onError: (err) => {
         extensionErrors++;
@@ -517,29 +610,20 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     unsubscribe?.();
     unsubscribeBackpressure?.();
     unsubscribe = session.subscribe((event) => {
-      if (event.type === 'agent_start') activityRevision++;
+      if (event.type === 'agent_start') {
+        activityRevision++;
+        unsettledTurn = true;
+        explicitlyAborted = false;
+      }
       output(toJsonEvent(event));
       if (event.type === 'agent_settled') {
+        unsettledTurn = false;
         void checkShutdownRequested();
       }
     });
     unsubscribeBackpressure = session.agent.subscribe(async () => {
       await waitForRawStdoutBackpressure();
     });
-  };
-  const registerSignalHandlers = () => {
-    const signals = ['SIGTERM'];
-    if (process.platform !== 'win32') {
-      signals.push('SIGHUP');
-    }
-    for (const signal of signals) {
-      const handler = () => {
-        killTrackedDetachedChildren();
-        void shutdown(signal === 'SIGHUP' ? 129 : 143, signal);
-      };
-      process.on(signal, handler);
-      signalCleanupHandlers.push(() => process.off(signal, handler));
-    }
   };
   const authCommands = createAuthCommands(() => session);
   const importCommands = createImportCommands(() => runtimeHost);
@@ -731,7 +815,46 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
       if (replacing) lifecyclePending = false;
     }
   };
+  let interruptionCacheManager;
+  let interruptionCacheLeaf;
+  let interruptionCacheEntries = [];
+  const shutdownInterruptionEntries = () => {
+    const manager = session.sessionManager;
+    const leaf = manager.getLeafId();
+    if (manager === interruptionCacheManager && leaf === interruptionCacheLeaf)
+      return interruptionCacheEntries;
+    const branch = manager.getBranch();
+    let start = branch.length - 1;
+    while (start >= 0) {
+      const entry = branch[start];
+      if (entry.type === 'message' && ['user', 'assistant'].includes(entry.message.role)) break;
+      start--;
+    }
+    const tail = branch.slice(Math.max(0, start));
+    interruptionCacheManager = manager;
+    interruptionCacheLeaf = leaf;
+    interruptionCacheEntries = tail.some(
+      (entry) => entry.type === 'custom' && entry.customType === 'vscode-pi.turn-interrupted'
+    )
+      ? tail.map((entry) =>
+          entry.type === 'message'
+            ? {
+                type: entry.type,
+                id: entry.id,
+                parentId: entry.parentId,
+                message: {
+                  role: entry.message.role,
+                  timestamp: entry.message.timestamp,
+                  stopReason: entry.message.stopReason,
+                },
+              }
+            : entry
+        )
+      : [];
+    return interruptionCacheEntries;
+  };
   const readState = () => ({
+    shutdownInterruptionEntries: shutdownInterruptionEntries(),
     sdkVersion: metadata.version,
     model: modelDto(session.model),
     thinkingLevel: session.thinkingLevel,
@@ -783,6 +906,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
         let preflightSucceeded = false;
         const reservation = {};
         promptPending.add(reservation);
+        activeCommands++;
         const release = () => promptPending.delete(reservation);
         void session
           .prompt(command.message, {
@@ -809,7 +933,11 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
               output(error(id, 'prompt', e.message));
             }
           })
-          .finally(release);
+          .finally(() => {
+            release();
+            activeCommands--;
+            void checkShutdownRequested();
+          });
         return undefined;
       }
       case 'steer': {
@@ -827,6 +955,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
         );
       }
       case 'abort': {
+        explicitlyAborted = true;
         cancelPendingDialogs('aborted');
         await session.abort();
         return success(id, 'abort');
@@ -904,7 +1033,7 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
         }
       }
       case 'get_scoped_models':
-        return success(id, command.type, scopes.read());
+        return success(id, command.type, await scopes.read());
       case 'set_scoped_models':
         return success(id, command.type, await scopes.set(command));
       case 'save_scoped_models_default': {
@@ -1366,15 +1495,35 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
    */
   // Per-session teardown (was process-wide shutdown). NO process.exit here:
   // one session closing must not kill the shared host / other sessions.
-  async function dispose() {
+  async function dispose(reason = 'host-shutdown') {
     if (shuttingDown) return;
     shuttingDown = true;
+    const interrupted = unsettledTurn && !explicitlyAborted;
     cancelPendingDialogs('closed');
+    if (interrupted) {
+      // abort() waits for the assistant entry to persist. appendCustomEntry uses
+      // synchronous JSONL writes in both supported SDKs and never enters LLM context.
+      let abortTimer;
+      try {
+        const completed = await Promise.race([
+          session.abort().then(() => true),
+          new Promise((resolve) => {
+            abortTimer = setTimeout(() => resolve(false), SHUTDOWN_ABORT_TIMEOUT_MS);
+          }),
+        ]);
+        if (!completed) console.error('pi host: session abort timed out during shutdown');
+      } catch {
+        console.error('pi host: session abort failed during shutdown');
+      } finally {
+        clearTimeout(abortTimer);
+      }
+      session.sessionManager.appendCustomEntry('vscode-pi.turn-interrupted', {
+        reason,
+        at: new Date().toISOString(),
+      });
+    }
     authCommands.dispose();
     await importCommands.discard();
-    for (const cleanup of signalCleanupHandlers) {
-      cleanup();
-    }
     unsubscribe?.();
     unsubscribeBackpressure?.();
     try {
@@ -1384,7 +1533,14 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
     }
   }
   async function checkShutdownRequested() {
-    if (!shutdownRequested) return;
+    if (
+      !shutdownRequested ||
+      shuttingDown ||
+      activeCommands > 0 ||
+      promptPending.size > 0 ||
+      !session.isIdle
+    )
+      return;
     await dispose();
     output({ type: 'session_closed' });
   }
@@ -1410,13 +1566,13 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
       output(error(command.id, command.type, 'SDK_STARTUP_IN_PROGRESS'));
       return;
     }
+    activeCommands++;
     try {
       const response = await handleCommand(command);
       if (response) {
         output(response);
         await waitForRawStdoutBackpressure();
       }
-      await checkShutdownRequested();
     } catch (commandError) {
       if (commandError?.[outboxAdmissionRefusal] === true) {
         output({
@@ -1438,6 +1594,9 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
         )
       );
       await waitForRawStdoutBackpressure();
+    } finally {
+      activeCommands--;
+      await checkShutdownRequested();
     }
   };
   return {
@@ -1457,20 +1616,17 @@ function createSessionRunner(sessionKey, runtimeHost, hostEmit) {
 //   inbound  rpc : the usual RPC command objects (routed to session k)
 //   outbound     : {k, d:<rpc response|event>} demuxed by the extension
 // ===========================================================================
-// Initialize the theme once (RPC mode, no watcher). Some MCP/extension paths
-// read the global theme; without this they warn "Theme not initialized".
-try {
-  initTheme(undefined, false);
-} catch {
-  /* invalid theme falls back to dark internally */
-}
-takeOverStdout();
+// Theme is initialized at import time above (sdk.initTheme). stdout is
+// redirected to stderr above so JSONL on fd 1 is never corrupted by SDK
+// console.log calls.
+// ===========================================================================
 const hostEmit = (k, obj) => {
   writeRawStdout(serializeJsonLine({ k, d: obj }));
 };
 
 const sessions = new Map();
 const openingSessions = new Map();
+const closingSessions = new Map();
 let dedicatedSessionKey;
 let dedicatedOpening = false;
 
@@ -1525,15 +1681,20 @@ async function openSession(k, info) {
   }
 }
 
-async function closeSession(k) {
+async function closeSession(k, reason = 'host-shutdown') {
+  if (closingSessions.has(k)) return closingSessions.get(k);
   openingSessions.delete(k);
   const runner = sessions.get(k);
   if (!runner) return;
   sessions.delete(k);
+  const closing = runner.dispose(reason);
+  closingSessions.set(k, closing);
   try {
-    await runner.dispose();
+    await closing;
   } catch {
     /* ignore */
+  } finally {
+    closingSessions.delete(k);
   }
 }
 
@@ -1575,21 +1736,55 @@ attachJsonlLineReader(process.stdin, (line) => {
   }
 });
 
-async function shutdownHost(code) {
-  for (const k of new Set([...sessions.keys(), ...openingSessions.keys()])) {
-    await closeSession(k);
-  }
+let hostShuttingDown = false;
+let hostSignalCount = 0;
+const HOST_SHUTDOWN_DEADLINE_MS = 10000; // Leave room for SDK disposal to settle credential writes.
+const EOF_SIGNAL_DEADLINE_MS = 3000;
+let hostDeadlineTimer;
+let hostShutdownCode;
+let hostShutdownReason;
+let hostShutdownStartedAt;
+async function shutdownHost(code, reason) {
+  if (hostShuttingDown) return;
+  hostShuttingDown = true;
+  hostShutdownCode = code;
+  hostShutdownReason = reason;
+  hostShutdownStartedAt = Date.now();
+  hostDeadlineTimer = setTimeout(() => process.exit(code), HOST_SHUTDOWN_DEADLINE_MS);
+  await Promise.allSettled(
+    [...new Set([...sessions.keys(), ...openingSessions.keys(), ...closingSessions.keys()])].map(
+      (k) => closeSession(k, reason)
+    )
+  );
   try {
     await flushRawStdout();
   } catch {
     /* ignore */
   }
+  clearTimeout(hostDeadlineTimer);
   process.exit(code);
 }
-process.stdin.on('end', () => void shutdownHost(0));
-for (const sig of process.platform === 'win32' ? ['SIGTERM'] : ['SIGTERM', 'SIGHUP']) {
+process.stdin.on('end', () => void shutdownHost(0, 'stdin-closed'));
+for (const sig of process.platform === 'win32'
+  ? ['SIGINT', 'SIGTERM']
+  : ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(sig, () => {
-    killTrackedDetachedChildren();
-    void shutdownHost(sig === 'SIGHUP' ? 129 : 143);
+    hostSignalCount++;
+    const code = sig === 'SIGHUP' ? 129 : sig === 'SIGINT' ? 130 : 143;
+    if (!hostShuttingDown) {
+      void shutdownHost(code, 'signal');
+    } else if (hostSignalCount > 1) {
+      process.exit(code);
+    } else if (hostShutdownReason === 'stdin-closed') {
+      // An EOF shutdown already started; the first signal accelerates its deadline.
+      clearTimeout(hostDeadlineTimer);
+      hostDeadlineTimer = setTimeout(
+        () => process.exit(hostShutdownCode),
+        Math.min(
+          EOF_SIGNAL_DEADLINE_MS,
+          Math.max(0, HOST_SHUTDOWN_DEADLINE_MS - (Date.now() - hostShutdownStartedAt))
+        )
+      );
+    }
   });
 }

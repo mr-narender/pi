@@ -107,11 +107,10 @@ no source/tests or removed legacy symbols/contributions. README, NOTICE and
 license match exactly. CHANGELOG matches after vsce's standard automatic issue
 link conversion (31 links); version remains 0.2.20 and the hard cut is Unreleased.
 
-The upstream drift baseline now records `631697cd35928fc8`. Fresh package audits
-confirmed that Pi SDK 0.99.1, 0.99.2, 1.0.0, 1.0.1 and 1.0.4 ship the identical
-28,129-byte `rpc-mode.js`; the supported shared/dedicated native-host suites pass
-against 1.0.4. `npm run check:drift` is therefore GREEN for the current supported
-SDK source rather than preserving the obsolete `bdd94e753e6d1973` baseline.
+Historical qualification compared the RPC source for Pi SDK 0.99.1–1.0.4.
+That source-hash drift gate has since been removed; the supported SDK range is
+now >=1.3.0 <2.0.0, qualified with public-API/protocol tests. See
+[Thin SDK host](thin-sdk-host.md) for the current design and exceptions.
 `graphify update .` was attempted but the executable/tool is unavailable. The
 stale graph is not represented as regenerated. Fresh callers are documented here.
 

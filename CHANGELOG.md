@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Use a thin public-SDK host for Pi >=1.3.0 <2.0.0 (tested with 1.3.0 and 1.5.2);
+  target managed installs at 1.5.2, retain stock RPC fallback, remove the upstream
+  source-hash drift gate, cache launch discovery, and adopt compatible prewarmed drafts.
+
+- With Pi ≥1.5, resumed chats re-enable registered extension tools absent from
+  the recorded loadout (native Pi behaviour).
+- Defer runtime warmup and session indexing until a chat surface opens; autoStart
+  now eagerly warms visible chat surfaces without starting a first-folder session.
+  Prewarm matching folder drafts for the next New Chat, including restored tabs.
+- Honor idle extension shutdown requests, wait for in-flight work before disposal,
+  guard repeated host signals, and reserve parked drafts before concurrent adoption.
+- Add workspace-persisted tool-output and thinking display toggles (macOS Cmd+Alt+O/T/D;
+  Windows/Linux Ctrl+K Alt+O/T/D chords avoid AltGr), with visible chat toolbar controls. Group live
+  delegated tools by parent call without guessing individual agent attribution.
+- Coalesce hidden-chat streaming deltas until reveal while retaining state and
+  completion snapshots; cache unchanged code highlighting. Offer text-only prompt
+  restoration for interrupted turns and point paused outbox messages to Send.
 - Honor VS Code's On/Off/Auto motion setting in remote webviews; the OS preference
   no longer overrides an explicit Off and freezes the working indicator.
 - Measure Mermaid labels using their SVG font size under the webview's strict

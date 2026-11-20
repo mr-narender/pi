@@ -25,6 +25,7 @@ async function managerFixture() {
             workspace: {
               getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }),
             },
+            window: { showInformationMessage: async () => undefined },
           }
         : require(id),
     module,
@@ -32,9 +33,11 @@ async function managerFixture() {
   );
   const manager = Object.create(module.exports.ChatTabManager.prototype);
   const resource = { toString: () => 'pi-chat:/remote.chat' };
-  const controller = { text: '' };
+  const controller = { text: '', snapshot: { eventHistory: [] as any[] } };
   const deliveries: Array<{ text: string; active: boolean }> = [];
   manager.pendingRender = new Map();
+  manager.pendingVisibleFlush = new Set();
+  manager.lastObservedEvent = new WeakMap();
   manager.outboxBindings = new Map();
   manager.outbox = { dispose: async () => {} };
   manager.lastRenderAt = new Map();
@@ -56,6 +59,128 @@ async function managerFixture() {
   manager.openChatsEmitter = { dispose() {} };
   return { manager, resource, controller, deliveries, Cache: module.exports.ChatTabStateCache };
 }
+
+test('interrupted text-only turn resends through the normal send path with an empty draft', async () => {
+  const { manager, resource, controller } = await managerFixture();
+  Object.assign(controller.snapshot, {
+    messages: [
+      { role: 'user', content: 'Retry me' },
+      { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'Partial' }] },
+    ],
+    leafId: 'marker',
+    connectionState: 'ready',
+    state: {
+      shutdownInterruptionEntries: [
+        {
+          type: 'message',
+          id: 'user',
+          parentId: null,
+          message: { role: 'user', content: 'Retry me' },
+        },
+        {
+          type: 'message',
+          id: 'assistant',
+          parentId: 'user',
+          message: {
+            role: 'assistant',
+            stopReason: 'aborted',
+            content: [{ type: 'text', text: 'Partial' }],
+          },
+        },
+        {
+          type: 'custom',
+          id: 'marker',
+          parentId: 'assistant',
+          customType: 'vscode-pi.turn-interrupted',
+          data: { reason: 'signal' },
+        },
+      ],
+    },
+  });
+  const actions: unknown[] = [];
+  manager.uiState = {
+    getComposerStateForIdentity: async () => ({ draft: '' }),
+    updateDraftForIdentity: async (_controller: unknown, _target: unknown, text: string) =>
+      actions.push(text),
+    setFocusForIdentity: async () => {},
+  };
+  manager.handleRequestSend = async (_resource: unknown, command: string) => actions.push(command);
+  await manager.handleRestoreInterruptedPrompt(resource, { controller, target: {} });
+  assert.deepEqual(actions, ['Retry me', 'prompt']);
+});
+
+test('interrupted turn never overwrites or sends an existing draft', async () => {
+  const { manager, resource, controller } = await managerFixture();
+  Object.assign(controller.snapshot, {
+    messages: [
+      { role: 'user', content: 'Retry me' },
+      { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'Partial' }] },
+    ],
+    leafId: 'marker',
+    connectionState: 'ready',
+    state: {
+      shutdownInterruptionEntries: [
+        {
+          type: 'message',
+          id: 'user',
+          parentId: null,
+          message: { role: 'user', content: 'Retry me' },
+        },
+        {
+          type: 'message',
+          id: 'assistant',
+          parentId: 'user',
+          message: {
+            role: 'assistant',
+            stopReason: 'aborted',
+            content: [{ type: 'text', text: 'Partial' }],
+          },
+        },
+        {
+          type: 'custom',
+          id: 'marker',
+          parentId: 'assistant',
+          customType: 'vscode-pi.turn-interrupted',
+          data: { reason: 'signal' },
+        },
+      ],
+    },
+  });
+  manager.uiState = {
+    getComposerStateForIdentity: async () => ({ draft: 'Keep me' }),
+    updateDraftForIdentity: async () => assert.fail('must preserve draft'),
+  };
+  manager.handleRequestSend = async () => assert.fail('must not send');
+  await manager.handleRestoreInterruptedPrompt(resource, { controller, target: {} });
+});
+
+test('interrupted attachment turn restores text but requires manual send', async () => {
+  const { manager, resource, controller } = await managerFixture();
+  Object.assign(controller.snapshot, {
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Review' },
+          { type: 'image', data: 'image-fixture' },
+        ],
+      },
+    ],
+    connectionState: 'ready',
+    state: {},
+  });
+  const restored: string[] = [];
+  manager.uiState = {
+    getComposerStateForIdentity: async () => ({ draft: '' }),
+    updateDraftForIdentity: async (_controller: unknown, _target: unknown, text: string) =>
+      restored.push(text),
+    setFocusForIdentity: async () => {},
+  };
+  manager.handleRequestSend = async () => assert.fail('must reattach before sending');
+  manager.renderResource = async () => {};
+  await manager.handleRestoreInterruptedPrompt(resource, { controller, target: {} });
+  assert.deepEqual(restored, ['Review']);
+});
 
 test('manager disposal returns one promise that waits for the deferred cache flush', async () => {
   const { manager, Cache } = await managerFixture();
@@ -121,9 +246,29 @@ test('ready draft renders defer persistence while a genuine working-to-settled t
     pendingImages: [],
     draft: '',
   };
+  manager.context = {
+    workspaceState: {
+      get: (_key: string) => undefined,
+      update: async () => {},
+    },
+  };
+  manager.pendingVisibleFlush = new Set();
   manager.contextForResource = () => ({ controller, resource, target: {} });
   manager.remoteSharing = { sharingInfoFor: () => undefined };
   manager.buildSnapshot = async () => snapshot;
+  manager.titleForContext = () => 'Owned chat';
+  manager.keyFor = () => resource.toString();
+  manager.follow.handleSnapshot = () => {};
+  const posted: string[] = [];
+  manager.hosts.set(resource.toString(), {
+    panel: { visible: false },
+    dispose() {},
+    postSnapshot: async (value: typeof snapshot) => {
+      posted.push(value.connectionState);
+    },
+  });
+  manager.outboxAcks = new Map();
+  manager.extensionUiDraftAcks = new Map();
   try {
     for (let i = 0; i < 30; i++) {
       snapshot = { ...snapshot, sequence: i, draft: `typing ${i}` };
@@ -141,6 +286,11 @@ test('ready draft renders defer persistence while a genuine working-to-settled t
     snapshot = { ...snapshot, connectionState: 'ready', isStreaming: false };
     await manager.renderResourceNow(resource);
     assert.equal(writes.length, 2, 'working-to-settled transition flushes immediately');
+    assert.deepEqual(
+      posted.slice(-2),
+      ['busy', 'ready'],
+      'hidden state/completion snapshots are still posted'
+    );
     snapshot = { ...snapshot, sequence: 31, draft: 'new draft' };
     await manager.renderResourceNow(resource);
     assert.equal(writes.length, 2, 'later ready frames return to bounded persistence');
@@ -172,6 +322,72 @@ test('continuous remote controller deltas deliver intermediate snapshots before 
   await Promise.all(pending);
   assert.equal(deliveries.at(-1)!.text, controller.text);
   assert.equal(manager.pendingRender.size, 0);
+});
+
+test('interrupted prompt restoration with pending attachments never sends or overwrites a draft', async () => {
+  const { manager, resource, controller, deliveries } = await managerFixture();
+  Object.assign(controller.snapshot, {
+    connectionState: 'ready',
+    state: {},
+    messages: [{ role: 'user', content: 'Restore me' }],
+  });
+  const restored: string[] = [];
+  let draft = '';
+  manager.uiState = {
+    getComposerStateForIdentity: async () => ({ draft, pendingImages: [{ id: 'pending' }] }),
+    updateDraftForIdentity: async (_controller: unknown, _target: unknown, text: string) => {
+      restored.push(text);
+    },
+    setFocusForIdentity: async () => {},
+  };
+  await manager.handleRestoreInterruptedPrompt(resource, { controller, target: {} });
+  assert.deepEqual(restored, ['Restore me']);
+  assert.equal(deliveries.length, 1);
+  draft = 'Keep me';
+  await manager.handleRestoreInterruptedPrompt(resource, { controller, target: {} });
+  assert.deepEqual(restored, ['Restore me']);
+});
+
+test('hidden deltas coalesce but state changes and completion still render', async () => {
+  const { manager, resource, controller, deliveries } = await managerFixture();
+  const panel = { visible: false };
+  manager.hosts.set(resource.toString(), { panel });
+  const change = async (type: string, deltaType?: string) => {
+    controller.snapshot.eventHistory.push({
+      type,
+      data: { assistantMessageEvent: { type: deltaType } },
+    });
+    await manager.onControllerChanged(controller);
+  };
+  await change('message_update', 'text_delta');
+  await change('message_update', 'thinking_delta');
+  await change('tool_execution_update');
+  assert.equal(deliveries.length, 0);
+  assert.equal(manager.pendingVisibleFlush.size, 1);
+  await change('tool_execution_start');
+  await change('agent_end');
+  assert.equal(deliveries.length, 2);
+  // Non-event state changes must render even when lastEventType is stale.
+  await manager.onControllerChanged(controller);
+  assert.equal(deliveries.length, 3);
+});
+
+test('hidden tab reveal flushes once for active and unfocused visible tabs', async () => {
+  for (const active of [true, false]) {
+    const { manager, resource, deliveries } = await managerFixture();
+    const host = { resource, panel: { visible: true } };
+    manager.pendingVisibleFlush.add(resource.toString());
+    manager.openChatsEmitter.fire = () => {};
+    manager.clearViewedCompletions = () => {};
+    manager.activateResource = async () => manager.renderResource(resource, { active: true });
+    await manager.onHostViewStateChanged(host, active);
+    assert.equal(deliveries.length, 1);
+    assert.equal(manager.pendingVisibleFlush.size, 0);
+    if (!active) {
+      await manager.onHostViewStateChanged(host, false);
+      assert.equal(deliveries.length, 1);
+    }
+  }
 });
 
 test('coalesced snapshots retain active requests and settle every caller', async (t) => {

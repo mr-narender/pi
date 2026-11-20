@@ -190,7 +190,11 @@ test('completed tabs stay quietly marked through snapshots until viewed, restart
     update({ type: 'agent_settled' });
     await manager.onHostDisposed(host);
     assert.equal(manager.unseenCompletions.size, 0);
-    assert.doesNotMatch(host.panel.title, /^● /);
+    assert.match(
+      host.panel.title,
+      /^● /,
+      'disposal clears bookkeeping without touching the dead panel'
+    );
     assert.equal(notices.length, 0, 'successful completion never enters the toast/sound notifier');
   } finally {
     manager.dispose();

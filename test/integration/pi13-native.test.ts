@@ -62,7 +62,7 @@ test(
 );
 
 async function fixture(profile: Parameters<typeof createNativeFixture>[0]) {
-  assert.equal((await resolveNativeCli('path-cli')).version, '1.3.0');
+  assert.match((await resolveNativeCli('path-cli')).version, /^1\./);
   return createNativeFixture(profile, 'selected-sdk');
 }
 
@@ -123,7 +123,7 @@ async function connect(
     return reply.data as JsonObject;
   };
   const capabilities = await request('get_capabilities');
-  assert.equal(capabilities.sdkVersion, '1.3.0');
+  assert.equal(capabilities.sdkVersion, (await resolveNativeCli()).version);
   assert.equal((capabilities.engineCommands as JsonObject).reload_session, mode === 'dedicated');
   const origin = async () => {
     const state = await client.getState();
@@ -469,9 +469,14 @@ for (const mode of ['shared', 'dedicated'] as const) {
     `Pi 1.3 ${mode}: persisted loadout resumes with exact CLI precedence`,
     { timeout: 30000 },
     async () => {
+      // SDK 1.5.2 agent-session.js:1453-1471 also activates unmentioned extension tools.
+      const newlyRegistered =
+        Number((await resolveNativeCli()).version.split('.')[1]) >= 5
+          ? ['vscode_definitions', 'vscode_document_symbols', 'vscode_references']
+          : [];
       const expected = {
-        'loadout-default': ['read', 'vscode_diagnostics'],
-        'loadout-modifiers': ['ls', 'vscode_diagnostics'],
+        'loadout-default': ['read', 'vscode_diagnostics', ...newlyRegistered].sort(),
+        'loadout-modifiers': ['ls', 'vscode_diagnostics', ...newlyRegistered].sort(),
         'loadout-explicit': ['read'],
         'loadout-none': [],
         'loadout-no-builtin': [
@@ -480,7 +485,7 @@ for (const mode of ['shared', 'dedicated'] as const) {
           'vscode_document_symbols',
           'vscode_references',
         ],
-        'loadout-excluded': ['read'],
+        'loadout-excluded': ['read', ...newlyRegistered].sort(),
       };
       for (const [scenario, names] of Object.entries(expected)) {
         const owned = await fixture('ide-tools');

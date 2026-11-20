@@ -30,6 +30,14 @@ export function assertManualModeExtensionsEnabled(
   }
 }
 
+export function getApprovalGateExtensionPath(): string | undefined {
+  return managedExtensionUri
+    ? vscode.Uri.joinPath(managedExtensionUri, 'resources', GATE_FILENAME).fsPath
+    : undefined;
+}
+
+export { assertApprovalGateActive } from './approvalGateSettings';
+
 export function approvalGateSyncError(): string | undefined {
   return syncError;
 }

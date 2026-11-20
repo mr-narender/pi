@@ -12,6 +12,36 @@ const log = process.env.PI_FIXTURE_NETWORK_LOG;
 if (!Number.isInteger(port) || port < 1 || !log)
   throw new Error('Missing fixture guard configuration');
 
+// Pi 1.5.2's credential-store proper-lockfile calls JS realpath, whose ancestor
+// lstat is denied by Node --permission even for canonical, granted fixture files.
+// Native realpath checks the exact granted file instead; never widen read grants.
+if (process.execArgv.includes('--permission') && process.env.PI_CODING_AGENT_DIR) {
+  const { join } = require('node:path');
+  const allowed = new Set([
+    join(process.env.PI_CODING_AGENT_DIR, 'auth.json'),
+    join(process.env.PI_CODING_AGENT_DIR, 'owned-public-auth.json'),
+    join(process.env.PI_CODING_AGENT_DIR, 'models-store.json'),
+  ]);
+  const original = fs.realpath;
+  const native = original.native;
+  const originalPromise = fs.promises.realpath;
+  const originalSync = fs.realpathSync;
+  fs.realpathSync = function (path, ...args) {
+    return (allowed.has(path) ? originalSync.native : originalSync).call(fs, path, ...args);
+  };
+  fs.realpathSync.native = originalSync.native;
+  fs.realpath = function (path, ...args) {
+    return (allowed.has(path) ? native : original).call(fs, path, ...args);
+  };
+  fs.realpath.native = native;
+  fs.promises.realpath = function (path, options) {
+    if (!allowed.has(path)) return originalPromise.call(this, path, options);
+    return new Promise((resolve, reject) => {
+      native(path, options, (error, value) => (error ? reject(error) : resolve(value)));
+    });
+  };
+}
+
 function deny(kind, host = '', destinationPort = 0) {
   // Never record paths, URL queries, credentials, headers or untrusted error text.
   const safeHost = /^[a-zA-Z0-9.:[\]-]+$/.test(String(host))

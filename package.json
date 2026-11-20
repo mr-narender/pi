@@ -51,8 +51,7 @@
     "package:vsix": "npm run build && npm run vendor:pi && npx @vscode/vsce package --no-dependencies --allow-missing-repository",
     "audit:prod": "npm audit --omit=dev",
     "gate": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration",
-    "gate:full": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:extension && npm run check:drift",
-    "check:drift": "node scripts/check-host-drift.mjs"
+    "gate:full": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:extension"
   },
   "dependencies": {
     "cross-spawn": "7.0.6",
@@ -543,6 +542,21 @@
         "title": "Pi Settings",
         "category": "Pi",
         "icon": "$(gear)"
+      },
+      {
+        "command": "piRpc.toggleToolDetails",
+        "title": "Toggle Tool Output Details",
+        "category": "Pi"
+      },
+      {
+        "command": "piRpc.toggleThinking",
+        "title": "Toggle Thinking Blocks",
+        "category": "Pi"
+      },
+      {
+        "command": "piRpc.toggleDetailMode",
+        "title": "Toggle Detail Mode (Tools + Thinking)",
+        "category": "Pi"
       }
     ],
     "configuration": {
@@ -609,7 +623,7 @@
         "piRpc.autoStart": {
           "type": "boolean",
           "default": false,
-          "description": "Start Pi automatically when a trusted file workspace is opened."
+          "description": "Warm the shared Pi runtime eagerly when a chat sidebar or tab becomes visible. Never starts a workspace session just by opening a window."
         },
         "piRpc.launchShell": {
           "type": "string",
@@ -1101,6 +1115,24 @@
         "key": "ctrl+f",
         "mac": "cmd+f",
         "when": "activeCustomEditorId == 'piRpc.chatEditor' && !editorTextFocus"
+      },
+      {
+        "command": "piRpc.toggleToolDetails",
+        "key": "ctrl+k alt+o",
+        "mac": "cmd+alt+o",
+        "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
+      },
+      {
+        "command": "piRpc.toggleThinking",
+        "key": "ctrl+k alt+t",
+        "mac": "cmd+alt+t",
+        "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
+      },
+      {
+        "command": "piRpc.toggleDetailMode",
+        "key": "ctrl+k alt+d",
+        "mac": "cmd+alt+d",
+        "when": "activeCustomEditorId == 'piRpc.chatEditor' || focusedView == 'piRpc.chat'"
       }
     ],
     "submenus": [

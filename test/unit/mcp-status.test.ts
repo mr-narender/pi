@@ -501,7 +501,7 @@ test('MCP capability negotiation revalidates ownership before dispatching the st
   release({
     type: 'response',
     success: true,
-    data: { protocol: 1, sdkVersion: '1.2.0', engineCommands: { contract: 1, mcp_status: true } },
+    data: { protocol: 1, sdkVersion: '1.3.0', engineCommands: { contract: 1, mcp_status: true } },
   });
   await assert.rejects(pending, /originating chat changed/);
   assert.deepEqual(commands, ['get_capabilities']);

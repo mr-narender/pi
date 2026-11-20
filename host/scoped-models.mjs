@@ -75,7 +75,7 @@ export function createScopeOperations(
     if (!identities.has(value)) identities.set(value, ++nextIdentity);
     return identities.get(value);
   };
-  function read() {
+  async function read() {
     const session = getSession();
     const settings = freshSettings();
     if (settings.drainErrors().length) failure('SCOPES_SETTINGS_READ_FAILED');
@@ -84,9 +84,9 @@ export function createScopeOperations(
     const projectPatterns = settings.getProjectSettings().enabledModels ?? null;
     const effectivePatterns = settings.getEnabledModels() ?? null;
     const scoped = [...session.scopedModels].map(refDto);
-    const diagnostics = (patterns) =>
+    const diagnostics = async (patterns) =>
       patterns
-        ? resolvePatterns(patterns, models).diagnostics.map(({ code, pattern }) => ({
+        ? (await resolvePatterns(patterns, models)).diagnostics.map(({ code, pattern }) => ({
             code,
             pattern,
           }))
@@ -101,8 +101,8 @@ export function createScopeOperations(
       patternSource:
         startupPatterns !== null ? 'cli' : projectPatterns !== null ? 'project' : 'global',
       projectOverride: projectPatterns !== null,
-      diagnostics: diagnostics(startupPatterns ?? effectivePatterns),
-      globalDiagnostics: diagnostics(globalPatterns),
+      diagnostics: await diagnostics(startupPatterns ?? effectivePatterns),
+      globalDiagnostics: await diagnostics(globalPatterns),
     };
     // Private revision inputs are deliberately not wire fields. Session IDs (not
     // leaves) also cover native in-memory new/switch operations on the same object.
@@ -126,7 +126,7 @@ export function createScopeOperations(
   }
   function set(command, save) {
     const run = queue.then(async () => {
-      const { session, settings, models, data, commitGuard } = read();
+      const { session, settings, models, data, commitGuard } = await read();
       if (command.expectedRevision !== data.revision) failure('SCOPES_STALE_REVISION');
       if (command.refs !== null && !Array.isArray(command.refs))
         failure('SCOPES_INVALID_SELECTION');
@@ -161,7 +161,7 @@ export function createScopeOperations(
         // save whose textual representation would restart as a different scope.
         if (
           patterns.length &&
-          JSON.stringify(resolvePatterns(patterns, models).scopedModels.map(refDto)) !==
+          JSON.stringify((await resolvePatterns(patterns, models)).scopedModels.map(refDto)) !==
             JSON.stringify(scope.map(refDto))
         )
           failure('SCOPES_PATTERN_AMBIGUOUS');
@@ -179,7 +179,7 @@ export function createScopeOperations(
         // concurrent chat's settings. Report that explicit outcome and don't retarget.
         let current;
         try {
-          current = read();
+          current = await read();
         } catch {
           failure('SCOPES_DEFAULT_SAVED_SESSION_NOT_APPLIED');
         }
@@ -191,10 +191,14 @@ export function createScopeOperations(
           failure('SCOPES_DEFAULT_SAVED_SESSION_NOT_APPLIED');
       }
       session.setScopedModels(scope.map((entry) => ({ ...entry })));
-      return read().data;
+      return (await read()).data;
     });
     queue = run.catch(() => {});
     return run;
   }
-  return { read: () => read().data, set: (c) => set(c, false), save: (c) => set(c, true) };
+  return {
+    read: async () => (await read()).data,
+    set: (c) => set(c, false),
+    save: (c) => set(c, true),
+  };
 }

@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { build } from 'esbuild';
 import { PassThrough } from 'node:stream';
-import { piLaunchEnvironment, SUPPORTED_PI_SDK_VERSIONS } from '../../src/process/piLauncher';
+import { piLaunchEnvironment, PI_SDK_RANGE } from '../../src/process/piLauncher';
 
 test('scopes controller and supervisor: shared/dedicated startup carry argv/env before first session; correlated controller mutation', async () => {
   const liveSettings: Record<string, unknown> = {};
   const opens: any[] = [];
+  const warmups: any[] = [];
   const handle = {
     stdin: new PassThrough(),
     stdout: new PassThrough(),
@@ -16,6 +17,7 @@ test('scopes controller and supervisor: shared/dedicated startup carry argv/env 
     stop: async () => {},
   };
   const host = {
+    warmPool: (...args: any[]) => warmups.push(args),
     openSession: async (info: any) => {
       opens.push(info);
       return handle;
@@ -46,7 +48,7 @@ test('scopes controller and supervisor: shared/dedicated startup carry argv/env 
         setup(b) {
           // This startup test owns a fake host; no executable or SDK discovery authority.
           b.onLoad({ filter: /piLauncher\.ts$/ }, () => ({
-            contents: `export { piLaunchEnvironment, SUPPORTED_PI_SDK_VERSIONS } from 'fixture-sdk-host';
+            contents: `export { piLaunchEnvironment, PI_SDK_RANGE } from 'fixture-sdk-host';
             export function isSupportedPiSdkVersion() { return true; }
             export function resolvePiLaunch(settings, env, cwd) {
               return Object.freeze({ command: settings.executable, prefixArgs: [],
@@ -71,7 +73,7 @@ test('scopes controller and supervisor: shared/dedicated startup carry argv/env 
       name === 'vscode'
         ? vscode
         : name === 'fixture-sdk-host'
-          ? { getSharedPiHost: () => host, piLaunchEnvironment, SUPPORTED_PI_SDK_VERSIONS }
+          ? { getSharedPiHost: () => host, piLaunchEnvironment, PI_SDK_RANGE }
           : require(name),
     mod,
     mod.exports
@@ -127,6 +129,21 @@ test('scopes controller and supervisor: shared/dedicated startup carry argv/env 
     assert.equal(open.env.PI_LAUNCH_SHELL, '/owned/shell');
     assert.equal(open.env.PI_TELEMETRY, '0');
     assert.equal(open.env.PI_SKIP_VERSION_CHECK, '1');
+    assert.equal(warmups.length, 1, 'only shared mode prewarms the next draft');
+    if (sharedRuntime) {
+      const [cwd, launch] = warmups[0];
+      assert.equal(cwd, open.cwd);
+      assert.equal(launch.sdkRoot, open.sdkRoot);
+      assert.equal(launch.env, open.env);
+      assert.deepEqual(launch.args, [
+        '--mode',
+        'rpc',
+        '--offline',
+        '--no-approve',
+        ...open.args.slice(7),
+      ]);
+      assert.equal(launch.sessionFile, undefined);
+    }
     await supervisor.stop();
   }
 

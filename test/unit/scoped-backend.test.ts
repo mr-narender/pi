@@ -2,35 +2,32 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { isSupportedPiSdkVersion, SUPPORTED_PI_SDK_VERSIONS } from '../../src/process/piLauncher';
+import { isSupportedPiSdkVersion } from '../../src/process/piLauncher';
 
 test('scopes SDK capability gate rejects mismatched package/version and missing actual API shape', async () => {
   const { validateSdkMetadata, validateSdkApi } = await import(
     pathToFileURL(resolve('host/startup-adapter.mjs')).href
   );
-  assert.equal(isSupportedPiSdkVersion('1.2.0'), true);
-  assert.equal(isSupportedPiSdkVersion('1.3.0'), true);
-  validateSdkMetadata({ name: '@earendil-works/pi-coding-agent', version: '1.2.0' });
-  assert.ok(SUPPORTED_PI_SDK_VERSIONS.includes('1.1.0'));
-  for (const version of SUPPORTED_PI_SDK_VERSIONS) {
-    assert.equal(isSupportedPiSdkVersion(version), true);
+  // Semver range: >=1.3.0 <2.0.0
+  for (const version of ['1.3.0', '1.4.0', '1.5.0', '1.5.2', '1.99.0']) {
+    assert.equal(isSupportedPiSdkVersion(version), true, `${version} should be in range`);
     validateSdkMetadata({ name: '@earendil-works/pi-coding-agent', version });
   }
   for (const metadata of [
-    { name: 'unknown', version: '0.99.1' },
-    { name: '@earendil-works/pi-coding-agent', version: '0.99.3' },
-    { name: '@earendil-works/pi-coding-agent', version: '1.1.1' },
-    { name: '@earendil-works/pi-coding-agent', version: '1.2.1' },
-    { name: '@earendil-works/pi-coding-agent', version: '1.3.1' },
-    { name: '@earendil-works/pi-coding-agent', version: '1.4.0' },
+    { name: 'unknown', version: '1.3.0' },
+    { name: '@earendil-works/pi-coding-agent', version: '0.99.1' },
+    { name: '@earendil-works/pi-coding-agent', version: '1.2.9' },
+    { name: '@earendil-works/pi-coding-agent', version: '2.0.0' },
     { name: '@earendil-works/pi-coding-agent', version: '1.3.0-next' },
-    { name: '@earendil-works/pi-coding-agent', version: '1.2.0-next' },
-    { name: '@earendil-works/pi-coding-agent', version: '1.1.0-next' },
-    { name: 'unknown', version: '1.1.0' },
+    { name: 'unknown', version: '1.5.2' },
     {},
   ]) {
     if (metadata.name === '@earendil-works/pi-coding-agent')
-      assert.equal(isSupportedPiSdkVersion(metadata.version), false);
+      assert.equal(
+        isSupportedPiSdkVersion(metadata.version),
+        false,
+        `${metadata.version} should be out of range`
+      );
     assert.throws(() => validateSdkMetadata(metadata), /SDK_HOST_VERSION_UNSUPPORTED/);
   }
   assert.throws(() => validateSdkApi({}), /SDK_HOST_API_UNSUPPORTED/);
@@ -85,12 +82,12 @@ test('scopes backend: copy both directions, stable revision, catalog drift, malf
     settings,
     () => ({ diagnostics: [] })
   );
-  const first = operations.read();
+  const first = await operations.read();
   first.scoped[0].thinkingLevel = 'off';
   first.models[0].name = 'Changed';
   assert.equal(scoped[0]!.thinkingLevel, 'high');
   assert.equal(models[0]!.name, 'One');
-  assert.equal(operations.read().revision, first.revision);
+  assert.equal((await operations.read()).revision, first.revision);
   assert.ok(!JSON.stringify(modelDto(models[0])).includes('SECRET'));
   const refs = [
     { provider: 'b', id: 'two', thinkingLevel: 'high' },
@@ -124,18 +121,18 @@ test('scopes backend: copy both directions, stable revision, catalog drift, malf
     /STALE_REVISION/
   );
   failRead = true;
-  assert.throws(() => operations.read(), /SETTINGS_READ_FAILED/);
+  await assert.rejects(operations.read(), /SETTINGS_READ_FAILED/);
   failRead = false;
   failWrite = true;
   await assert.rejects(
-    operations.save({ refs: [], expectedRevision: operations.read().revision }),
+    operations.save({ refs: [], expectedRevision: (await operations.read()).revision }),
     /^Error: SCOPES_SETTINGS_WRITE_FAILED$/
   );
   assert.equal(scoped.length, 2, 'flush error prevents staged session commit');
   failWrite = false;
   const unrestricted = await operations.set({
     refs: null,
-    expectedRevision: operations.read().revision,
+    expectedRevision: (await operations.read()).revision,
   });
   assert.deepEqual(unrestricted.scoped, []);
 });
@@ -186,7 +183,7 @@ test('native ambiguous model patterns stay warnings; only unavailable defaults r
   const refs = [{ provider: 'a', id: 'one' }];
   await operations.save({
     refs,
-    expectedRevision: operations.read().revision,
+    expectedRevision: (await operations.read()).revision,
     replaceUnavailable: false,
   });
   assert.equal(writes, 1);
@@ -196,7 +193,7 @@ test('native ambiguous model patterns stay warnings; only unavailable defaults r
   await assert.rejects(
     operations.save({
       refs,
-      expectedRevision: operations.read().revision,
+      expectedRevision: (await operations.read()).revision,
       replaceUnavailable: false,
     }),
     /UNAVAILABLE_PATTERNS_REQUIRE_CONFIRMATION/
@@ -204,7 +201,7 @@ test('native ambiguous model patterns stay warnings; only unavailable defaults r
   assert.equal(writes, 1, 'unavailable global patterns are retained without consent');
   await operations.save({
     refs,
-    expectedRevision: operations.read().revision,
+    expectedRevision: (await operations.read()).revision,
     replaceUnavailable: true,
   });
   assert.equal(writes, 2);

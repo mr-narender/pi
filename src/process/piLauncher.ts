@@ -1,5 +1,5 @@
 import { existsSync, realpathSync, readFileSync, accessSync, constants, statSync } from 'node:fs';
-import { delimiter, dirname, join, resolve, isAbsolute } from 'node:path';
+import { delimiter, dirname, join, resolve, isAbsolute, relative, sep } from 'node:path';
 import type { PiRpcSettings } from '../config/settings';
 
 export interface PathPiInfo {
@@ -8,25 +8,116 @@ export interface PathPiInfo {
    * binary can't be traced to @earendil-works/pi-coding-agent (e.g. wrappers). */
   packageRoot?: string;
   version?: string;
+  /** Set when the binary is Pi's own managed-install shim (<agentDir>/bin/pi).
+   * This is the `install/` directory that pi-launcher.js manages. */
+  managedInstallRoot?: string;
 }
 
-// Exact audited contracts only: never admit a new minor/major by semver range.
-export const TESTED_PI_VERSION = { major: 1, minor: 3 };
-export const SUPPORTED_PI_SDK_VERSIONS = [
-  '0.99.1',
-  '0.99.2',
-  '1.0.0',
-  '1.0.4',
-  '1.1.0',
-  '1.2.0',
-  '1.3.0',
-] as const;
+// Semver-range gate: the thin SDK host depends on stable public API surface
+// (createAgentSessionServices, AgentSession, AgentSessionRuntime, etc.).
+// Verified against installed fixtures: .github/pi-sdk-13 (1.3.0) and
+// .github/pi-sdk-15 (1.5.2). The range admits any future 1.x patch/minor that
+// preserves the same exports without requiring a new extension release.
+export const PI_SDK_RANGE = { minMajor: 1, minMinor: 3, maxExclusiveMajor: 2 } as const;
+/** Specific version targeted by managed auto-install. */
+export const MANAGED_PI_TARGET = '1.5.2';
+export const TESTED_PI_VERSION = { major: 1, minor: 5 };
+
+/** Check whether a version string falls in the supported SDK range (>=1.3.0 <2.0.0).
+ *  Pre-release versions (e.g. 1.3.0-next) are rejected — only stable releases are admitted. */
 export function isSupportedPiSdkVersion(version: unknown): version is string {
-  return SUPPORTED_PI_SDK_VERSIONS.includes(version as (typeof SUPPORTED_PI_SDK_VERSIONS)[number]);
+  if (typeof version !== 'string') return false;
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) return false;
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  return (
+    major >= PI_SDK_RANGE.minMajor &&
+    major < PI_SDK_RANGE.maxExclusiveMajor &&
+    (major > PI_SDK_RANGE.minMajor || minor >= PI_SDK_RANGE.minMinor)
+  );
 }
+/** Pi-launcher.js version validation: only safe filesystem-name characters. */
+const MANAGED_VERSION_RE = /^[0-9A-Za-z._+-]+$/;
+const PI_PACKAGE_NAME = '@earendil-works/pi-coding-agent';
+
+export interface ManagedInstallInfo {
+  /** Package root of the resolved release (the sdkRoot). */
+  sdkRoot: string;
+  /** Resolved cli.js inside the release package. */
+  cliPath: string;
+  /** The `install/` directory (PI_MANAGED_INSTALL_ROOT value). */
+  installRoot: string;
+  /** Version string from current-version. */
+  version: string;
+}
+
+/**
+ * Detect and resolve Pi's own MANAGED-INSTALL layout from a bin path.
+ *
+ * Layout (created by `pi update self` / the managed installer):
+ *   <agentDir>/bin/pi | pi.cmd          (shim)
+ *   <agentDir>/bin/pi-launcher.js
+ *   <agentDir>/install/managed-install.json
+ *   <agentDir>/install/current-version
+ *   <agentDir>/install/releases/<ver>/node_modules/@earendil-works/pi-coding-agent/
+ *
+ * Resolution mirrors pi-launcher.js: read current-version, validate the version
+ * string, locate the package, verify name + SDK range + bin.pi containment.
+ */
+export function resolveManagedInstallSdk(binPath: string): ManagedInstallInfo | undefined {
+  try {
+    const binDir = dirname(binPath);
+    // Marker: pi-launcher.js must exist alongside the shim.
+    if (!existsSync(join(binDir, 'pi-launcher.js'))) return undefined;
+    const agentDir = dirname(binDir);
+    const installRoot = join(agentDir, 'install');
+    // Both markers must exist.
+    if (!existsSync(join(installRoot, 'managed-install.json'))) return undefined;
+    const versionFile = join(installRoot, 'current-version');
+    if (!existsSync(versionFile)) return undefined;
+    const version = readFileSync(versionFile, 'utf8').trim();
+    if (!MANAGED_VERSION_RE.test(version)) return undefined;
+    // Reject path-traversal attempts in the version string.
+    if (version.includes('..') || version.includes('/') || version.includes('\\')) return undefined;
+    const pkgDir = join(
+      installRoot,
+      'releases',
+      version,
+      'node_modules',
+      '@earendil-works',
+      'pi-coding-agent'
+    );
+    if (!existsSync(join(pkgDir, 'package.json'))) return undefined;
+    const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as {
+      name?: string;
+      version?: string;
+      bin?: { pi?: string };
+    };
+    if (pkg.name !== PI_PACKAGE_NAME) return undefined;
+    if (!isSupportedPiSdkVersion(pkg.version)) return undefined;
+    if (!pkg.bin?.pi) return undefined;
+    // Reject traversal in bin.pi (e.g. "../../etc/evil").
+    const binPi = pkg.bin.pi;
+    const resolvedCli = resolve(pkgDir, binPi);
+    const realCli = realpathSync(resolvedCli);
+    // Containment: the resolved CLI must live inside the package directory.
+    const rel = relative(realpathSync(pkgDir), realCli);
+    if (isAbsolute(rel) || rel.startsWith('..' + sep) || rel === '..') return undefined;
+    if (!existsSync(realCli)) return undefined;
+    return {
+      sdkRoot: realpathSync(pkgDir),
+      cliPath: realCli,
+      installRoot: realpathSync(installRoot),
+      version,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 let compatLogged = false;
 
-/** PATH pi's package root, gated on host-fork compatibility. */
+/** PATH pi's package root, gated on SDK semver range compatibility. */
 export function usablePathPiRoot(logger?: {
   warn(message: string): void;
   info(message: string): void;
@@ -39,7 +130,7 @@ export function usablePathPiRoot(logger?: {
   if (!root && !compatLogged) {
     compatLogged = true;
     logger?.warn(
-      `PATH pi v${info.version} has no audited canonical SDK contract; using stock RPC only.`
+      `PATH pi v${info.version} is outside the supported SDK range (>=1.3.0 <2.0.0); using stock RPC subprocess only.`
     );
   }
   return root;
@@ -73,6 +164,9 @@ function verifiedSdkRoot(cli: string): string | undefined {
   } catch {
     /* Unknown wrapper/binary remains stock-only. */
   }
+  // Managed-install fallback: the CLI is a shim, walk-up cannot find the package.
+  const managed = resolveManagedInstallSdk(cli);
+  if (managed) return managed.sdkRoot;
   return undefined;
 }
 
@@ -124,6 +218,18 @@ export function detectPathPi(): PathPiInfo | undefined {
   } catch {
     /* realpath failed — binary still usable as an external subprocess */
   }
+  // Managed-install fallback: the shim's realpath doesn't walk up to a package.
+  if (!packageRoot) {
+    const managed = resolveManagedInstallSdk(bin);
+    if (managed) {
+      return {
+        binPath: bin,
+        packageRoot: managed.sdkRoot,
+        version: managed.version,
+        managedInstallRoot: managed.installRoot,
+      };
+    }
+  }
   return { binPath: bin, packageRoot, version };
 }
 
@@ -134,8 +240,10 @@ let managedCliPath: string | undefined;
 
 export function setBundledPiCliPath(path: string | undefined): void {
   bundledCliPath = path;
+  invalidatePiLaunchCache();
 }
 export function setManagedPiCliPath(path: string | undefined): void {
+  invalidatePiLaunchCache();
   managedCliPath = path && verifiedSdkRoot(path) ? path : undefined;
 }
 export function bundledPiAvailable(): boolean {
@@ -146,6 +254,9 @@ export type PiLaunchMode = 'subprocess' | 'worker';
 
 export interface PiLaunchPlan {
   readonly sdkRoot?: string;
+  /** Set when the CLI is Pi's managed-install shim; the value to pass as
+   * PI_MANAGED_INSTALL_ROOT so `pi update self` and other managed features work. */
+  readonly managedInstallRoot?: string;
   readonly env: NodeJS.ProcessEnv;
   readonly cwd: string;
   readonly mode: PiLaunchMode;
@@ -211,6 +322,24 @@ export function piLaunchEnvironment(
   };
 }
 
+// Cache filesystem discovery only, never the captured environment or launch plan.
+// A short TTL detects CLI replacements outside extension-controlled installs.
+// managedInstallRoot + managedVersionContent enable cheap invalidation when
+// `pi update self` writes a new current-version without waiting for TTL expiry.
+const launchDiscovery = new Map<
+  string,
+  {
+    expires: number;
+    command: string;
+    sdkRoot?: string;
+    managedInstallRoot?: string;
+    managedVersionContent?: string;
+  }
+>();
+export function invalidatePiLaunchCache(): void {
+  launchDiscovery.clear();
+}
+
 /** Resolve one authoritative runtime: explicit executable, current PATH, then
  * the selected managed/dev fallback when neither external source exists. */
 export function resolvePiLaunch(
@@ -219,7 +348,19 @@ export function resolvePiLaunch(
   cwd = process.cwd()
 ): PiLaunchPlan {
   const configuredExecutable = settings.executable !== 'pi';
-  const pathExecutable = resolveExecutable(settings.executable, env, cwd);
+  const discoveryKey = JSON.stringify([
+    settings.executable,
+    settings.piSource,
+    env.PATH,
+    env.Path,
+    env.PATHEXT,
+    cwd,
+    bundledCliPath,
+    managedCliPath,
+  ]);
+  const cached = launchDiscovery.get(discoveryKey);
+  const discovery = cached && cached.expires > Date.now() ? cached : undefined;
+  const pathExecutable = discovery?.command ?? resolveExecutable(settings.executable, env, cwd);
   const existingPathPi = (() => {
     try {
       accessSync(pathExecutable, process.platform === 'win32' ? constants.F_OK : constants.X_OK);
@@ -239,15 +380,71 @@ export function resolvePiLaunch(
   const command = choice.usingBundled
     ? choice.command
     : resolveExecutable(choice.command, launchEnv, launchCwd);
+  // Detect managed-install: resolve sdkRoot and installRoot together.
+  let sdkRoot: string | undefined;
+  let managedInstallRoot: string | undefined;
+  let managedVersionContent: string | undefined;
+  if (discovery) {
+    // Invalidate cached managed-install when current-version file changed.
+    if (discovery.managedInstallRoot && discovery.managedVersionContent !== undefined) {
+      try {
+        const current = readFileSync(
+          join(discovery.managedInstallRoot, 'current-version'),
+          'utf8'
+        ).trim();
+        if (current !== discovery.managedVersionContent) {
+          // Version changed (pi update self); force fresh discovery.
+          launchDiscovery.delete(discoveryKey);
+          return resolvePiLaunch(settings, env, cwd);
+        }
+      } catch {
+        /* File disappeared — fall through to fresh discovery. */
+        launchDiscovery.delete(discoveryKey);
+        return resolvePiLaunch(settings, env, cwd);
+      }
+    }
+    sdkRoot = discovery.sdkRoot;
+    managedInstallRoot = discovery.managedInstallRoot;
+  } else {
+    const target = cliPath ?? prefixArgs[0] ?? command;
+    // Try managed-install first (captures installRoot for PI_MANAGED_INSTALL_ROOT).
+    const managed = resolveManagedInstallSdk(target);
+    if (managed) {
+      sdkRoot = managed.sdkRoot;
+      managedInstallRoot = managed.installRoot;
+      managedVersionContent = managed.version;
+    } else {
+      sdkRoot = verifiedSdkRoot(target);
+    }
+  }
+  if (!discovery) {
+    if (launchDiscovery.size >= 32) launchDiscovery.clear();
+    launchDiscovery.set(discoveryKey, {
+      expires: Date.now() + 1000,
+      command: pathExecutable,
+      sdkRoot,
+      managedInstallRoot,
+      managedVersionContent,
+    });
+  }
+  // Merge PI_MANAGED_INSTALL_ROOT into the launch env when the shim is a
+  // managed install, matching pi-launcher.js's behaviour for both SDK host
+  // and stock subprocess spawns.
+  const managedEnvPatch: Record<string, string> = managedInstallRoot
+    ? { PI_MANAGED_INSTALL_ROOT: managedInstallRoot }
+    : {};
+  const finalExtraEnv = Object.freeze({ ...choice.extraEnv, ...managedEnvPatch });
+  const finalEnv = Object.freeze({ ...env, ...finalExtraEnv });
   return Object.freeze({
     ...choice,
     command,
     cliPath,
     prefixArgs: Object.freeze(prefixArgs),
-    extraEnv: Object.freeze({ ...choice.extraEnv }),
-    env: launchEnv,
+    extraEnv: finalExtraEnv,
+    env: finalEnv,
     cwd: launchCwd,
-    sdkRoot: verifiedSdkRoot(cliPath ?? prefixArgs[0] ?? command),
+    sdkRoot,
+    managedInstallRoot,
   });
 }
 

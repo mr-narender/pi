@@ -3,79 +3,93 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { transform } from 'esbuild';
 
-async function startupFixture(tabs: unknown[], trusted = true, autoStart = true) {
+async function startupFixture(autoStart: boolean) {
   const source = readFileSync('src/extension.ts', 'utf8');
-  const start = source.lastIndexOf('  const firstFolder =');
-  const end = source.indexOf('\n}\nexport async function deactivate', start);
+  const start = source.indexOf('  const workers = getSettings().runtimeWorkers;');
+  const end = source.indexOf('  // Record the loaded build', start);
   assert.ok(start >= 0 && end > start);
-  const compiled = await transform(`async function run() {${source.slice(start, end)}}`, {
-    loader: 'ts',
-  });
-  const calls: string[] = [];
-  const firstFolder = { uri: { fsPath: '/different-first-root' } };
-  const controller = { start: async () => calls.push('start-new-session') };
+  const compiled = await transform(
+    `function run() {${source.slice(start, end)}; return warmSidebar;}`,
+    { loader: 'ts' }
+  );
+  const warmed: any[] = [];
+  const timers: { callback: () => void; delay: number }[] = [];
+  let roots = 0;
+  const context = {
+    extensionPath: '/extension',
+    globalStorageUri: { fsPath: '/tmp/pi-extension/activation-neutral' },
+    subscriptions: [] as any[],
+  };
   const run = new Function(
     'vscode',
-    'settings',
-    'registry',
-    'broker',
-    'statusBar',
-    'refreshViews',
+    'context',
+    'getSettings',
+    'initSharedPiHost',
+    'disposeSharedPiHost',
+    'resolvePiRoot',
+    'piLaunchEnvironment',
+    'logger',
+    'setTimeout',
+    'clearTimeout',
     `${compiled.code}; return run;`
   )(
     {
-      workspace: { workspaceFolders: [firstFolder], isTrusted: trusted },
-      window: { tabGroups: { all: [{ tabs }] } },
-    },
-    { autoStart },
-    {
-      getOrCreate: (folder: unknown) => {
-        assert.equal(folder, firstFolder);
-        calls.push('get-first-controller');
-        return controller;
+      Uri: { joinPath: () => ({ fsPath: '/tmp/pi-extension/activation-neutral/cache' }) },
+      workspace: {
+        get workspaceFolders() {
+          throw new Error('activation warmup must not inspect folders');
+        },
       },
-      setActive: () => calls.push('set-active'),
     },
-    { track: () => calls.push('track') },
-    { bind: () => calls.push('bind') },
-    () => calls.push('refresh')
+    context,
+    () => ({ autoStart, sharedRuntime: true, piSource: 'managed', runtimeWorkers: 'auto' }),
+    () => ({ warmPool: (...args: any[]) => warmed.push(args) }),
+    () => {},
+    async () => {
+      roots++;
+      return '/sdk';
+    },
+    () => ({}),
+    { warn: assert.fail },
+    (callback: () => void, delay: number) => {
+      timers.push({ callback, delay });
+      return 1;
+    },
+    () => {}
   );
-  await run();
-  return calls;
+  return { warm: run() as () => void, warmed, timers, roots: () => roots };
 }
 
-test('restored Pi chat does not allocate an unrelated first-folder session', async () => {
-  const calls = await startupFixture([
-    {
-      input: {
-        viewType: 'piRpc.chatEditor',
-        uri: { scheme: 'pi-chat', path: '/chat-original-jsonl.chat' },
-      },
-    },
-  ]);
-  assert.deepEqual(calls, []);
-});
-
-test('restored draft chat owns startup without another default session', async () => {
-  assert.deepEqual(
-    await startupFixture([
-      { input: { viewType: 'piRpc.chatEditor', uri: { path: '/new-chat-bound.chat' } } },
-    ]),
-    []
-  );
-});
-
-test('ordinary workspace still starts its default controller', async () => {
-  for (const tabs of [[], [{ input: { viewType: 'other.customEditor' } }]]) {
-    assert.deepEqual(await startupFixture(tabs), [
-      'get-first-controller',
-      'track',
-      'set-active',
-      'bind',
-      'start-new-session',
-      'refresh',
+for (const autoStart of [false, true]) {
+  test(`activation never warms a folder or starts a session (autoStart=${autoStart})`, async () => {
+    const fixture = await startupFixture(autoStart);
+    assert.equal(fixture.roots(), 0);
+    assert.deepEqual(fixture.warmed, []);
+    assert.equal(fixture.timers.length, 0);
+    fixture.warm();
+    fixture.warm();
+    assert.equal(fixture.timers.length, 1, 'sidebar reveal is one-shot and debounced');
+    assert.equal(fixture.timers[0]!.delay, autoStart ? 0 : 100);
+    fixture.timers[0]!.callback();
+    // SDK resolution and neutral storage mkdir are async, with no session open.
+    for (let i = 0; i < 100 && !fixture.warmed.length; i++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(fixture.warmed, [
+      [undefined, { cwd: '/tmp/pi-extension/activation-neutral', sdkRoot: '/sdk', env: {} }],
     ]);
-  }
-  assert.deepEqual(await startupFixture([], false), []);
-  assert.deepEqual(await startupFixture([], true, false), []);
+  });
+}
+
+test('restored tabs own folder startup; no eager first-folder controller or session scan remains', () => {
+  const source = readFileSync('src/extension.ts', 'utf8');
+  assert.doesNotMatch(
+    source,
+    /await controller\.start\(\);\s*refreshViews\(\);\s*}\s*}\s*export async function deactivate/
+  );
+  assert.doesNotMatch(source, /void recentSessions\.refresh\(\);/);
+  assert.match(readFileSync('src/process/supervisor.ts', 'utf8'), /sharedHost\.warmPool\(cwd, \{/);
+  assert.match(
+    readFileSync('src/editorTabs/tabManager.ts', 'utf8'),
+    /this\.onChatSurface\?\.\(\);/
+  );
 });

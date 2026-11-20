@@ -25,7 +25,7 @@ async function until(predicate: () => boolean | Promise<boolean>) {
 
 async function connect(fixture: NativeFixture, mode: 'shared' | 'dedicated'): Promise<SpawnedRpc> {
   const selected = await resolveNativeCli('path-cli');
-  assert.equal(selected.version, '1.3.0');
+  assert.match(selected.version, /^1\./);
   const plan = await nativeSdkHostPlan(fixture, mode);
   assert.equal(plan.env.PI_HOST_PI_ROOT, selected.root);
   assert.equal(plan.env.PI_HOST_DEDICATED, mode === 'dedicated' ? '1' : '0');
@@ -70,7 +70,7 @@ async function connect(fixture: NativeFixture, mode: 'shared' | 'dedicated'): Pr
     await shutdown(rpc);
     throw new Error('Owned native outbox fixture failed to open');
   }
-  assert.equal((await client.getCapabilities())!.sdkVersion, '1.3.0');
+  assert.equal((await client.getCapabilities())!.sdkVersion, selected.version);
   assert.equal(
     ((await client.getCapabilities())!.engineCommands as JsonObject).outbox_prompt,
     true

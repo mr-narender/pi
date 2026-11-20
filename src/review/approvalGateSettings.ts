@@ -29,3 +29,15 @@ export function mergeApprovalGateSetting(existingJson: string | undefined): stri
   }
   return JSON.stringify(settings, null, 2) + '\n';
 }
+
+/** A mode file is not proof that Pi loaded the enforcing extension. */
+export function assertApprovalGateActive(commands: unknown): void {
+  if (
+    !Array.isArray(commands) ||
+    !commands.some((command) => command?.name === 'pi-vscode-approval-gate')
+  ) {
+    throw new Error(
+      'Manual Mode approval gate is not active in this session. Prompt blocked; restart Pi to load the packaged approval gate.'
+    );
+  }
+}

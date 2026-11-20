@@ -139,7 +139,7 @@ for (const mode of ['stock', 'shared', 'dedicated'] as const) {
     async () => {
       const runtime = mode === 'stock' ? 'path-cli' : 'supported-sdk';
       const selected = await resolveNativeCli(runtime);
-      if (mode !== 'stock') assert.equal(selected.version, '1.2.0');
+      if (mode !== 'stock') assert.match(selected.version, /^1\./);
       const fixture = await createNativeFixture('ide-tools', runtime);
       let spawned: SpawnedRpc | undefined;
       try {

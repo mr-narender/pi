@@ -131,11 +131,33 @@ export interface HighlightedCode {
   language?: string;
 }
 
+// LRU highlight cache keyed by (code, language). Avoids re-highlighting
+// unchanged code blocks on every streaming snapshot (Goal C render hygiene).
+const HIGHLIGHT_CACHE_MAX = 256;
+const highlightCache = new Map<string, HighlightedCode>();
+
+function cacheKey(code: string, language: string): string {
+  return `${language}\0${code}`;
+}
+
+/** Clear the highlight cache (exposed for tests). */
+export function clearHighlightCache(): void {
+  highlightCache.clear();
+}
+
+/** Current cache size (exposed for tests). */
+export function highlightCacheSize(): number {
+  return highlightCache.size;
+}
+
 /**
  * Highlight a code string. When the fence language is known it is used
  * directly; otherwise auto-detection runs over the registered subset. The
  * returned html is highlight.js output (already escaped) OR, if highlighting
  * fails, the raw code escaped by the caller-provided escaper.
+ *
+ * Results are cached by (code, language) to avoid re-highlighting unchanged
+ * blocks during streaming.
  */
 export function highlightCode(
   code: string,
@@ -143,22 +165,42 @@ export function highlightCode(
   escape: (value: string) => string
 ): HighlightedCode {
   ensureRegistered();
+  const key = cacheKey(code, language);
+  const cached = highlightCache.get(key);
+  if (cached) {
+    highlightCache.delete(key);
+    highlightCache.set(key, cached);
+    return cached;
+  }
   const resolved = resolveLanguage(language);
+  let result: HighlightedCode;
   try {
     if (resolved) {
-      const result = hljs.highlight(code, { language: resolved, ignoreIllegals: true });
-      return { html: result.value, language: resolved };
-    }
-    // No explicit language: only auto-detect for multi-line blocks (single
-    // lines are too ambiguous and often mis-detected).
-    if (code.includes('\n')) {
+      const highlighted = hljs.highlight(code, { language: resolved, ignoreIllegals: true });
+      result = { html: highlighted.value, language: resolved };
+    } else if (code.includes('\n')) {
+      // No explicit language: only auto-detect for multi-line blocks (single
+      // lines are too ambiguous and often mis-detected).
       const auto = hljs.highlightAuto(code);
       if (auto.relevance >= 5 && auto.value) {
-        return { html: auto.value, language: auto.language };
+        result = { html: auto.value, language: auto.language };
+      } else {
+        result = { html: escape(code) };
       }
+    } else {
+      result = { html: escape(code) };
     }
   } catch {
     // Fall through to plain escaped output on any highlighter error.
+    result = { html: escape(code) };
   }
-  return { html: escape(code) };
+  // Avoid retaining huge outputs; keys include the full code to prevent collisions.
+  if (code.length > 64 * 1024) return result;
+  // Evict least recently used entries when the cache grows too large.
+  if (highlightCache.size >= HIGHLIGHT_CACHE_MAX) {
+    const first = highlightCache.keys().next().value;
+    if (first !== undefined) highlightCache.delete(first);
+  }
+  highlightCache.set(key, result);
+  return result;
 }

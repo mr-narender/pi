@@ -92,6 +92,9 @@ shared Pi runtime pool     configurable workers host sessions (per-session exten
                            a draft session is prewarmed so New Chat opens instantly
 ```
 
+- A [thin SDK host](https://github.com/mr-narender/Pi/blob/main/docs/thin-sdk-host.md) uses Pi's public session/runtime APIs
+  for stable SDKs **>=1.3.0 <2.0.0** (tested: 1.3.0 and 1.5.2). Managed installs
+  target 1.5.2; custom wrappers and out-of-range versions keep stock RPC fallback.
 - The first chat boots the shared runtime; every further chat attaches in the background
   while the tab paints immediately (animated loader, then the composer goes live).
 - Sessions are named **Session N** by default and can be renamed; the real session id
@@ -167,15 +170,23 @@ eye on it (or nudging it) from the couch.
 
 ## Keyboard
 
-| Shortcut                   | Action                             |
-| -------------------------- | ---------------------------------- |
-| `Enter`                    | Send the current message           |
-| `Shift+Enter`              | Insert a newline                   |
-| `Cmd+Enter` / `Ctrl+Enter` | Also sends (works while composing) |
-| `Cmd+K` / `Ctrl+K`         | Command palette of in-chat actions |
-| `Cmd+F` / `Ctrl+F`         | Find in the current chat           |
-| `Cmd+Z` / `Ctrl+Z`         | Undo composer text edits           |
-| `Cmd+Shift+Z` / `Ctrl+Y`   | Redo composer text edits           |
+| Shortcut                     | Action                             |
+| ---------------------------- | ---------------------------------- |
+| `Enter`                      | Send the current message           |
+| `Shift+Enter`                | Insert a newline                   |
+| `Cmd+Enter` / `Ctrl+Enter`   | Also sends (works while composing) |
+| `Cmd+K` / `Ctrl+K`           | Command palette of in-chat actions |
+| `Cmd+F` / `Ctrl+F`           | Find in the current chat           |
+| `Cmd+Alt+O` / `Ctrl+K Alt+O` | Toggle all tool output details     |
+| `Cmd+Alt+T` / `Ctrl+K Alt+T` | Show/hide thinking blocks          |
+| `Cmd+Alt+D` / `Ctrl+K Alt+D` | Toggle tools + thinking together   |
+| `Cmd+Z` / `Ctrl+Z`           | Undo composer text edits           |
+| `Cmd+Shift+Z` / `Ctrl+Y`     | Redo composer text edits           |
+
+Display toggles are scoped to Pi chats and also available as visible toolbar buttons
+and Pi commands. Tools and thinking start hidden; choices persist per workspace.
+Individual tool cards remain independently expandable. These are webview equivalents
+of Pi TUI Ctrl+O/Ctrl+T, not terminal bindings (Ctrl+O still opens files elsewhere).
 
 Undo after sending restores the submitted text into the composer for editing.
 It does not retract or resend the message. `Ctrl+Shift+Z` also supports Redo.

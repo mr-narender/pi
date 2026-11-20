@@ -21,6 +21,7 @@ import { RpcClient } from '../rpc/client';
 import { RpcTransport } from '../rpc/transport';
 import { checkPiVersion } from './version';
 import { getIdeExtensionPath } from '../ide/query';
+import { getApprovalGateExtensionPath } from '../review/approvalGate';
 
 export interface SupervisorEvents {
   exit: [number | null, NodeJS.Signals | null];
@@ -122,6 +123,16 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           }
         );
         if (startEpoch !== this.startEpoch) throw cancelled();
+        if (this.settings.sharedRuntime) {
+          // Capture the same trust, IDE extension, offline and user arguments as
+          // the next default chat; a resumed file is never part of a parked draft.
+          sharedHost.warmPool(cwd, {
+            cwd,
+            sdkRoot: launch.sdkRoot,
+            env,
+            args: this.buildArgs(undefined, { offline }),
+          });
+        }
         this.logger.info(
           `Starting Pi for ${this.folder.name} (generation=${this.generation}) via ${backendLabel} ` +
             `[cwd=${this.folder.uri.fsPath}, session=${existingSessionPath ?? '(new)'}]`
@@ -152,6 +163,11 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     // probe only external binaries the user pointed us at.
     if (!launch.usingBundled) {
       await this.assertVersion(launch);
+    }
+    if (!launch.sdkRoot) {
+      this.logger.info(
+        'Selected executable has no compatible SDK root (>=1.3.0 <2.0.0); using stock pi --mode rpc fallback.'
+      );
     }
     const useShell = launch.usingBundled ? false : SPAWN_WITH_SHELL;
     this.logger.info(
@@ -339,6 +355,15 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
       ideExtension
     ) {
       args.push('--extension', ideExtension);
+    }
+    const approvalGate = getApprovalGateExtensionPath();
+    if (
+      vscode.workspace.isTrusted &&
+      !options?.noExtensions &&
+      !excludesExtensions &&
+      approvalGate
+    ) {
+      args.push('--extension', approvalGate);
     }
     if (existingSessionPath) {
       args.push('--session', existingSessionPath);

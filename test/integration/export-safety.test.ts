@@ -160,7 +160,7 @@ test('export real controller/client: immutable client and branch, capability wai
   rpc.command = async (type: string, args: any) => {
     if (type === 'get_capabilities') {
       change();
-      return { protocol: 1, sdkVersion: '0.99.1', exports: { jsonl: true } };
+      return { protocol: 1, sdkVersion: '1.5.2', exports: { jsonl: true } };
     }
     writes.push({ type, args });
     return { path: args.outputPath };

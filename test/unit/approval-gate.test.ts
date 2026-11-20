@@ -16,6 +16,7 @@ async function syncHarness() {
     Uri: {
       joinPath: (uri: { path: string }, ...parts: string[]) => ({
         path: posix.join(uri.path, ...parts),
+        fsPath: posix.join(uri.path, ...parts),
       }),
     },
     workspace: {
@@ -42,7 +43,11 @@ async function syncHarness() {
     },
   };
   const output = await build({
-    entryPoints: ['src/review/approvalGate.ts'],
+    stdin: {
+      contents:
+        "export * from './src/review/approvalGate'; export { SessionController } from './src/sessions/sessionController'; export { PiProcessSupervisor } from './src/process/supervisor';",
+      resolveDir: process.cwd(),
+    },
     bundle: true,
     write: false,
     platform: 'node',
@@ -386,4 +391,49 @@ test('invalid or unreadable project settings fail before writing any policy file
     /permission denied/
   );
   assert.deepEqual(h.operations, []);
+});
+
+test('Manual Mode prompt admission fails closed unless the packaged gate is confirmed in this runtime', async () => {
+  const h = await syncHarness();
+  await h.module.syncApprovalGateForWorkspace({ path: '/extension' }, true);
+  const controller = Object.create(h.module.SessionController.prototype);
+  let commands: unknown = [];
+  let dispatched = 0;
+  controller.settings = { additionalArgs: [] };
+  controller.requireClient = () => ({ getCommands: async () => ({ commands }) });
+  controller.promptAdmitted = async () => {
+    dispatched++;
+  };
+  for (commands of [undefined, [], [{ name: 'pi-project-approval-gate' }]]) {
+    await assert.rejects(
+      controller.promptNow('Edit', 'prompt', [], undefined, () => true),
+      /approval gate is not active.*Prompt blocked/
+    );
+  }
+  assert.equal(dispatched, 0);
+  commands = [{ name: 'pi-vscode-approval-gate' }];
+  await controller.promptNow('Edit', 'prompt', [], undefined, () => true);
+  assert.equal(dispatched, 1);
+  commands = [];
+  await assert.rejects(
+    controller.promptNow('Edit again', 'prompt', [], undefined, () => true),
+    /Prompt blocked/
+  );
+  assert.equal(dispatched, 1, 'a prior receipt is never reused after a runtime loses the gate');
+});
+
+test('supervisor explicitly loads the packaged gate without granting native project trust', async () => {
+  const h = await syncHarness();
+  await h.module.syncApprovalGateForWorkspace({ path: '/extension' }, true);
+  const supervisor = Object.create(h.module.PiProcessSupervisor.prototype);
+  Object.defineProperty(supervisor, 'settings', {
+    value: { additionalArgs: [], allowApproveInTrustedWorkspace: false },
+  });
+  const args = supervisor.buildArgs();
+  assert.ok(args.includes('--no-approve'));
+  assert.ok(!args.includes('--approve'));
+  const index = args.indexOf('--extension');
+  assert.ok(index >= 0);
+  assert.equal(args[index + 1], '/extension/resources/pi-approval-gate.ts');
+  assert.ok(!supervisor.buildArgs(undefined, { noExtensions: true }).includes('--extension'));
 });

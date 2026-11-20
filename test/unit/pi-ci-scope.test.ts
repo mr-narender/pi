@@ -18,7 +18,7 @@ test('CI classification separates validation-only changes from shipped runtime i
   const { needsExtensionBuild } = await scope;
   for (const path of [
     '.github/workflows/pi.yml',
-    '.github/pi-sdk/package-lock.json',
+    '.github/pi-sdk-15/package-lock.json',
     'docs/ci-release.md',
     'README.md',
     'CHANGELOG.md',
@@ -204,7 +204,6 @@ test('pi-quality remains required for every event while build, artifacts and aut
     'Integration',
     'Real Pi',
     'VS Code extension host',
-    'Host drift',
     'Package and inspect stable VSIX',
   ])
     assert.equal(
