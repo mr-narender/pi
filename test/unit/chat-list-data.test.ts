@@ -335,67 +335,6 @@ test('buildChatListModel: open row keeps tab title when the record resolves to n
   assert.equal(model.rows[0]?.title, 'Session 2');
 });
 
-test('buildChatListModel: favorites float to the top of each block, newest-first within groups', () => {
-  const model = buildChatListModel({
-    openChats: [
-      { resource: 'o1', title: 'OpenNew', active: true, sessionFile: '/s/o1.jsonl' },
-      { resource: 'o2', title: 'OpenFav', active: false, sessionFile: '/s/o2.jsonl' },
-    ],
-    recent: {
-      ...baseRecent,
-      items: [
-        { id: '1', path: '/s/o1.jsonl', modifiedAt: 900, createdAt: 900 } as never,
-        { id: '2', path: '/s/o2.jsonl', modifiedAt: 100, createdAt: 100 } as never,
-        {
-          id: '3',
-          path: '/s/r1.jsonl',
-          modifiedAt: 800,
-          createdAt: 800,
-          displayName: 'RecNew',
-        } as never,
-        {
-          id: '4',
-          path: '/s/r2.jsonl',
-          modifiedAt: 50,
-          createdAt: 50,
-          displayName: 'RecFav',
-        } as never,
-      ],
-    },
-    favorites: new Set(['/s/o2.jsonl', '/s/r2.jsonl']),
-  });
-  assert.deepEqual(
-    model.rows.map((r) => [r.title, r.favorite]),
-    [
-      ['OpenFav', true],
-      ['OpenNew', false],
-      ['RecFav', true],
-      ['RecNew', false],
-    ]
-  );
-});
-
-test('buildChatListModel: a favorited recent survives the 20-row cap', () => {
-  const items = Array.from({ length: 25 }, (_, i) => ({
-    id: `s${i}`,
-    path: `/s/s${i}.jsonl`,
-    modifiedAt: 1000 - i,
-    createdAt: 1000 - i,
-    displayName: `Chat ${i}`,
-  })) as never[];
-  const model = buildChatListModel({
-    openChats: [],
-    recent: { ...baseRecent, items },
-    favorites: new Set(['/s/s24.jsonl']),
-  });
-  assert.equal(model.rows.length, 20);
-  assert.deepEqual(model.rows[0] && [model.rows[0].title, model.rows[0].favorite], [
-    'Chat 24',
-    true,
-  ]);
-  assert.equal(model.rows[1]?.title, 'Chat 0');
-});
-
 test('buildChatListModel: recents carry raw modifiedAt + label-only detail (renderer owns time text)', () => {
   const model = buildChatListModel({
     openChats: [],

@@ -30,10 +30,6 @@ export interface ChatListRow {
   sizeBytes?: number;
   active: boolean;
   isOpen: boolean;
-  /** Starred by the user (hover star icon); favorites float to the top of
-   * their block and keep a visible filled star. Only rows with a real
-   * session file can be favorited (the star is keyed by sessionPath). */
-  favorite?: boolean;
   openCommand: { resource?: string; sessionPath?: string; label?: string };
   sessionPath?: string;
 }
@@ -157,13 +153,7 @@ export function decideSnapshotPush(
   const identity = JSON.stringify([
     model.selectedFolder ?? '',
     model.folders ?? [],
-    model.rows.map((row) => [
-      row.id,
-      row.active,
-      row.sessionPath ?? '',
-      row.favorite === true,
-      row.title,
-    ]),
+    model.rows.map((row) => [row.id, row.active, row.sessionPath ?? '', row.title]),
   ]);
   if (identity === state.lastIdentity && !model.loading && state.hasShownRealData) {
     return {

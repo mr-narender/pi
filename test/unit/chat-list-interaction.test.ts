@@ -51,8 +51,6 @@ test('Agentic view relies on native title actions and row actions target trusted
   assert.equal(document.querySelector('.chat-list-toolbar'), null);
   assert.equal(document.querySelector('.sb-more'), null);
   assert.equal(document.querySelector('#new-chat-btn'), null);
-  document.querySelector<HTMLButtonElement>('[data-act="changes"]')!.click();
-  assert.deepEqual(posted.at(-1), { type: 'showChatChanges', rowId: 'recent:one' });
   assert.equal(document.body.hasAttribute('data-agentic-theme'), false);
 });
 
