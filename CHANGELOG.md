@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Detached runtime is now on by default; replies survive network drops, window reloads and closes (`piRpc.detachedRuntime.enabled = false` as kill switch).
 - Use a thin public-SDK host for Pi >=1.3.0 <2.0.0 (tested with 1.3.0 and 1.5.2);
   target managed installs at 1.5.2, retain stock RPC fallback, remove the upstream
   source-hash drift gate, cache launch discovery, and adopt compatible prewarmed drafts.

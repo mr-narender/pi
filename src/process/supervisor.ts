@@ -31,6 +31,90 @@ import { checkPiVersion } from './version';
 import { getIdeExtensionPath } from '../ide/query';
 import { getApprovalGateExtensionPath } from '../review/approvalGate';
 
+// ── Parked detached drafts ───────────────────────────────────────────────
+// A parked draft is a session opened on the detached runtime (no session file)
+// for a given (cwd, envKey). The next default New Chat for that folder adopts
+// it instantly, mirroring sharedPiHost's adoption rules. Parked drafts are
+// never persisted and must not keep the runtime alive: they do not count as
+// active turns. They are closed on window deactivate via disposeParkedDrafts.
+
+interface ParkedDetachedDraft {
+  handle: PiProcessHandle;
+  conn: DetachedIpcConnection;
+  cwd: string;
+  sdkRoot: string;
+  envKey: string;
+  args: string[];
+  channelKey: string;
+}
+
+/** Map key: `${cwd}\0${envKey}` */
+const parkedDetachedDrafts = new Map<string, ParkedDetachedDraft>();
+const parkedDraftTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function parkedDraftKey(cwd: string, envKey: string): string {
+  return `${cwd}\0${envKey}`;
+}
+
+/** Close all parked detached drafts (window deactivate / extension dispose). */
+export function disposeParkedDetachedDrafts(): void {
+  for (const timer of parkedDraftTimers.values()) clearTimeout(timer);
+  parkedDraftTimers.clear();
+  for (const draft of parkedDetachedDrafts.values()) {
+    void draft.handle.stop();
+    draft.conn.dispose();
+  }
+  parkedDetachedDrafts.clear();
+}
+
+/**
+ * Pre-spawn (or verify) the detached runtime for the sidebar warmup.
+ * Folder-neutral: no session, no project resources. The runtime will be
+ * ready for the first New Chat to open a session instantly.
+ */
+export async function warmDetachedRuntime(opts: {
+  sdkRoot: string;
+  env: NodeJS.ProcessEnv;
+  globalStorageFsPath: string;
+  extensionPath: string;
+  idleMinutes: number;
+  logger: { info(msg: string): void; warn(msg: string): void };
+}): Promise<void> {
+  const baseDir = detachedRuntimeBaseDir(opts.globalStorageFsPath);
+  const envKey = PiProcessSupervisor.computeEnvKey(opts.env);
+
+  const release = acquireLock(baseDir);
+  try {
+    const existing = findByEnv(baseDir, opts.sdkRoot, envKey);
+    if (existing) {
+      // Runtime already alive — just verify via token read.
+      try {
+        readTokenFile(existing.tokenFile);
+        opts.logger.info('Detached runtime already warm for sidebar');
+        return;
+      } catch {
+        // Stale entry — spawn below.
+      }
+    }
+    const hostScript = pathJoin(opts.extensionPath, 'host', 'pi-multi-host.mjs');
+    if (!existsSync(hostScript)) {
+      opts.logger.warn('Detached runtime host script not found; skipping sidebar warmup');
+      return;
+    }
+    await spawnDetachedRuntime({
+      hostScript,
+      sdkRoot: opts.sdkRoot,
+      envKey,
+      env: { ...opts.env },
+      runtimeBaseDir: baseDir,
+      idleMs: opts.idleMinutes * 60 * 1000,
+    });
+    opts.logger.info('Detached runtime pre-spawned for sidebar warmup');
+  } finally {
+    release();
+  }
+}
+
 export interface SupervisorEvents {
   exit: [number | null, NodeJS.Signals | null];
 }
@@ -111,9 +195,9 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
       this.folder.uri.fsPath
     );
     const { env, cwd } = launch;
-    // --- Detached runtime path (opt-in, default OFF) ---
-    // When enabled, spawn or re-attach to a detached runtime that outlives the
-    // extension host. Falls back to the shared host on any failure.
+    // --- Detached runtime path (default ON, kill switch via setting) ---
+    // Spawn or re-attach to a detached runtime that outlives the extension host.
+    // Falls back to the shared host on any failure.
     if (
       this.settings.detachedRuntimeEnabled &&
       launch.sdkRoot &&
@@ -332,7 +416,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
   }
 
   /** Stable hash of the process environment for one-per-(sdkRoot,envKey) dedup. */
-  private static computeEnvKey(env: NodeJS.ProcessEnv): string {
+  public static computeEnvKey(env: NodeJS.ProcessEnv): string {
     const entries = Object.keys(env)
       .sort()
       .filter((key) => env[key] !== undefined)
@@ -357,10 +441,42 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
   ): Promise<RpcClient | undefined> {
     const baseDir = detachedRuntimeBaseDir(this.globalStorageFsPath!);
     const envKey = PiProcessSupervisor.computeEnvKey(env);
-    const channelKey =
-      existingSessionPath ?? `new-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const cancelled = () =>
       Object.assign(new Error('Pi startup was cancelled'), { code: 'SDK_STARTUP_CANCELLED' });
+
+    // --- Parked draft adoption (default New Chat only) ---
+    // Mirror sharedPiHost: synchronous reservation, stale replacement on mismatch,
+    // never for resume or dedicated.
+    if (!existingSessionPath) {
+      const draftKey = parkedDraftKey(cwd, envKey);
+      const draft = parkedDetachedDrafts.get(draftKey);
+      if (draft) {
+        // Reserve synchronously.
+        parkedDetachedDrafts.delete(draftKey);
+        const argsMatch =
+          JSON.stringify(args) === JSON.stringify(draft.args) && draft.sdkRoot === sdkRoot;
+        if (argsMatch) {
+          this.generation += 1;
+          this.detachedConnection = draft.conn;
+          this.usingDetached = true;
+          const client = this.attachClient(draft.handle, 'detached runtime');
+          options?.onClient?.(client);
+          this.logger.info(
+            `Adopted parked detached draft for ${this.folder.name} (generation=${this.generation})`
+          );
+          // Replenish.
+          this.scheduleDetachedPrewarm(sdkRoot, env, envKey, cwd, args);
+          return client;
+        }
+        // Stale: launch identity changed.
+        this.logger.info('Replacing stale parked detached draft (launch identity changed)');
+        void draft.handle.stop();
+        draft.conn.dispose();
+      }
+    }
+
+    const channelKey =
+      existingSessionPath ?? `new-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     // Hold the registry lock across find → spawn → add to prevent two windows
     // from spawning duplicate runtimes for the same (sdkRoot, envKey).
@@ -477,7 +593,79 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
       `Starting Pi for ${this.folder.name} (generation=${this.generation}) via detached runtime ` +
         `[cwd=${cwd}, session=${existingSessionPath ?? '(new)'}]`
     );
+
+    // Schedule a parked draft for the next default New Chat (replenish).
+    if (!existingSessionPath) {
+      this.scheduleDetachedPrewarm(sdkRoot, env, envKey, cwd, args);
+    }
+
     return client;
+  }
+
+  /**
+   * Schedule opening a parked draft session on the detached runtime for the
+   * given folder so the next default New Chat adopts it instantly.
+   */
+  private scheduleDetachedPrewarm(
+    sdkRoot: string,
+    env: NodeJS.ProcessEnv,
+    envKey: string,
+    cwd: string,
+    args: string[]
+  ): void {
+    const draftKey = parkedDraftKey(cwd, envKey);
+    if (parkedDetachedDrafts.has(draftKey) || parkedDraftTimers.has(draftKey)) return;
+    const timer = setTimeout(() => {
+      parkedDraftTimers.delete(draftKey);
+      void this.prewarmDetachedDraft(sdkRoot, env, envKey, cwd, args);
+    }, 3000);
+    timer.unref?.();
+    parkedDraftTimers.set(draftKey, timer);
+  }
+
+  private async prewarmDetachedDraft(
+    sdkRoot: string,
+    env: NodeJS.ProcessEnv,
+    envKey: string,
+    cwd: string,
+    args: string[]
+  ): Promise<void> {
+    const draftKey = parkedDraftKey(cwd, envKey);
+    if (parkedDetachedDrafts.has(draftKey)) return;
+    try {
+      const baseDir = detachedRuntimeBaseDir(this.globalStorageFsPath!);
+      const entry = findByEnv(baseDir, sdkRoot, envKey);
+      if (!entry) return; // Runtime gone.
+      let token: string;
+      try {
+        token = readTokenFile(entry.tokenFile);
+      } catch {
+        return; // Stale.
+      }
+      const conn = new DetachedIpcConnection(sdkRoot);
+      const attachResult = await conn.connect(entry.endpoint, token);
+      if (!attachResult.ok) {
+        conn.dispose();
+        return;
+      }
+      const channelKey = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      // Build default new-chat args (no session file).
+      const handle = await conn.openSession(channelKey, { cwd, args });
+      parkedDetachedDrafts.set(draftKey, {
+        handle,
+        conn,
+        cwd,
+        sdkRoot,
+        envKey,
+        args,
+        channelKey,
+      });
+      this.logger.info(`Parked detached draft for ${cwd}`);
+    } catch (error) {
+      this.logger.warn(
+        `Detached draft prewarm failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   /** Human-readable remediation for a spawn failure. */

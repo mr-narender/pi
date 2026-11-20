@@ -26,6 +26,7 @@ async function startupFixture(autoStart: boolean) {
     'getSettings',
     'initSharedPiHost',
     'disposeSharedPiHost',
+    'disposeParkedDetachedDrafts',
     'resolvePiRoot',
     'piLaunchEnvironment',
     'logger',
@@ -44,6 +45,7 @@ async function startupFixture(autoStart: boolean) {
     context,
     () => ({ autoStart, sharedRuntime: true, piSource: 'managed', runtimeWorkers: 'auto' }),
     () => ({ warmPool: (...args: any[]) => warmed.push(args) }),
+    () => {},
     () => {},
     async () => {
       roots++;
@@ -79,6 +81,23 @@ for (const autoStart of [false, true]) {
     ]);
   });
 }
+
+test('focus loss does not dispose parked detached drafts; only deactivation does', () => {
+  const source = readFileSync('src/extension.ts', 'utf8');
+  // The onDidChangeWindowState → disposeParkedDetachedDrafts pattern was a perf regression.
+  // Parked drafts must only be disposed via context.subscriptions on deactivation.
+  assert.doesNotMatch(
+    source,
+    /onDidChangeWindowState[\s\S]{0,200}disposeParkedDetachedDrafts/,
+    'onDidChangeWindowState must not dispose parked detached drafts'
+  );
+  // Verify deactivation disposal is registered.
+  assert.match(
+    source,
+    /context\.subscriptions\.push\(\{\s*dispose:\s*\(\)\s*=>\s*disposeParkedDetachedDrafts\(\)/,
+    'disposeParkedDetachedDrafts must be registered in context.subscriptions for deactivation'
+  );
+});
 
 test('restored tabs own folder startup; no eager first-folder controller or session scan remains', () => {
   const source = readFileSync('src/extension.ts', 'utf8');
