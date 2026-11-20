@@ -79,16 +79,6 @@ test('golden: chat-list row — active open chat', () => {
 
 const NOW = Date.UTC(2024, 0, 4, 12, 0, 0);
 
-test('golden: chat-list row — favorite with detail (badge + filled star + paint-time "5m ago")', () => {
-  checkGolden(
-    'chat-list-row-favorite',
-    renderChatListRow(
-      row({ favorite: true, detail: 'workspace', modifiedAt: NOW - 5 * 60_000 }),
-      NOW
-    )
-  );
-});
-
 test('golden: chat-list row — fresh draft (no session file → delete only)', () => {
   checkGolden(
     'chat-list-row-draft',
@@ -138,7 +128,7 @@ test('golden: chat-list shell wrapping a populated body (with search box)', () =
     {
       rows: [
         row({ id: 'open:pi-chat://one', title: 'OpenChat', active: true, isOpen: true }),
-        row({ favorite: true, detail: 'workspace', modifiedAt: NOW - 2 * 60 * 60_000 }),
+        row({ detail: 'workspace', modifiedAt: NOW - 2 * 60 * 60_000 }),
       ],
       loading: false,
     },
@@ -342,14 +332,14 @@ test('chat-list row: stale/invalid modifiedAt renders no time fragment at all', 
 });
 
 test('chat-list row: hover strip carries exactly the expected actions in order', () => {
-  // Structural guard independent of the golden bytes: changes → favorite →
-  // rename → delete for a persisted row; changes → delete for a draft.
+  // Structural guard independent of the golden bytes: rename → delete for a
+  // persisted row; delete only for a draft (no session file to rename into).
   const acts = (html: string): string[] =>
     [...html.matchAll(/data-act="([a-z]+)"/g)].map((m) => m[1]!);
-  assert.deepEqual(acts(renderChatListRow(row())), ['changes', 'favorite', 'rename', 'delete']);
+  assert.deepEqual(acts(renderChatListRow(row())), ['rename', 'delete']);
   assert.deepEqual(
     acts(renderChatListRow(row({ sessionPath: undefined, openCommand: { resource: 'r' } }))),
-    ['changes', 'delete']
+    ['delete']
   );
   const html = renderChatListRow(row({ title: 'Chat name' }));
   assert.ok(html.includes('data-tooltip="Chat name"'));

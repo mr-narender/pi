@@ -25,8 +25,7 @@ test('explicit list snapshot request recovers a snapshot sent before webview rea
     {},
     { onDidChangeOpenChats: () => disposable, listOpenChats: () => [] },
     { onDidChange: () => disposable },
-    {},
-    { get: () => [] }
+    {}
   );
   const delivered: unknown[] = [];
   let ready = false;
@@ -141,8 +140,7 @@ test('workspace roots and other projects remain visible and open in their indexe
         refreshes += 1;
       },
     },
-    a,
-    { get: () => [] }
+    a
   );
   assert.deepEqual(
     host.buildModel().rows.map((row: any) => row.title),

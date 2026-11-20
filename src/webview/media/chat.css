@@ -3779,11 +3779,6 @@ button.composer-thinking svg {
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
 }
 
-.chat-list-row-fav.is-fav,
-.chat-list-row-favbadge {
-  color: var(--vscode-charts-yellow, #e2b73d);
-}
-
 .chat-list-row-delete:hover {
   color: var(--vscode-errorForeground, #e05252);
   background: color-mix(in srgb, var(--vscode-errorForeground, #e05252) 13%, transparent);
@@ -3792,21 +3787,6 @@ button.composer-thinking svg {
 .chat-list-row-action svg {
   width: 14px;
   height: 14px;
-}
-
-.chat-list-row-favbadge {
-  display: inline-flex;
-  margin-right: 5px;
-  vertical-align: -1px;
-}
-
-.chat-list-row-favbadge svg {
-  width: 11px;
-  height: 11px;
-}
-
-.chat-list-row:hover .chat-list-row-favbadge {
-  display: none;
 }
 
 .chat-list-empty,
@@ -4467,8 +4447,17 @@ body.chat-list-view {
 
 .chat-list-shell {
   gap: 0;
-  padding: 10px 9px 12px;
+  padding: 10px 0 12px 9px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.chat-list-folder-label {
+  margin-right: 9px;
+}
+
+.chat-list-folder {
+  margin-right: 9px;
+  width: auto;
 }
 
 .chat-list-search {
@@ -4479,10 +4468,13 @@ body.chat-list-view {
   border-radius: var(--pi-radius-control);
   background: var(--vscode-input-background, var(--pi-surface-control));
   font-size: 12px;
+  margin-right: 10px;
+  width: auto;
 }
 
 .chat-list-scroll {
   display: block;
+  padding-right: 9px;
 }
 
 .chat-list-section {

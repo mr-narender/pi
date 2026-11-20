@@ -53,13 +53,8 @@ test('decideSnapshotPush: once real data has shown, an error state still pushes 
   assert.equal(errored.push, true);
 });
 
-test('decideSnapshotPush: a favorite flip or title change (same ids) is pushed', () => {
+test('decideSnapshotPush: a title change (same ids) is pushed', () => {
   const first = decideSnapshotPush({ rows, loading: false }, { hasShownRealData: false });
-  const starred = decideSnapshotPush(
-    { rows: [{ ...rows[0]!, favorite: true }], loading: false },
-    first
-  );
-  assert.equal(starred.push, true, 'favorite flip must re-push');
   const renamed = decideSnapshotPush(
     { rows: [{ ...rows[0]!, title: 'fix the login redirect bug' }], loading: false },
     first

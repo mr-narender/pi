@@ -6,15 +6,10 @@
 // through these functions only — new markup goes here, with a golden.
 import { formatRelativeTime, type ChatListModel, type ChatListRow } from './chatListShared';
 
-const ICON_DIFF =
-  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M8 2v12M4 6h2m-1-1v2m5 4h2"/></svg>';
 const ICON_CHAT =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-9l-6 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M10 9v5M15 9v5"/></svg>';
 const ICON_TRASH =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.5 4.5V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M4.5 4.5l.5 8a1 1 0 0 0 1 .9h4a1 1 0 0 0 1-.9l.5-8"/></svg>';
-const STAR_PATH = 'M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.2L8 11.5l-3.8 2 .7-4.2-3.1-3 4.3-.6L8 1.8z';
-const ICON_STAR = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="${STAR_PATH}"/></svg>`;
-const ICON_STAR_FILLED = `<svg viewBox="0 0 16 16" fill="currentColor" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="${STAR_PATH}"/></svg>`;
 const ICON_PENCIL =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.1 2.4a1.4 1.4 0 0 1 2 2L5.6 11.9l-2.8.8.8-2.8 7.5-7.5z"/></svg>';
 
@@ -61,29 +56,22 @@ function rowSizeWarning(row: ChatListRow): string {
 }
 
 export function renderChatListRow(row: ChatListRow, now = Date.now()): string {
-  // Favorite + rename need a real session file (the star is keyed by
-  // sessionPath; piRpcInternal.renameSession writes into the file) — a
-  // fresh never-saved draft only offers delete (which closes its tab).
-  const canTarget = Boolean(row.sessionPath);
-  const favTitle = row.favorite ? 'Remove from favorites' : 'Add to favorites';
-  const detail = rowDetailText(row, now);
-  // The action strip is a hover OVERLAY (absolute, own background), so the
-  // name always gets the row's full width; the inline star badge (hidden
-  // while hovering, when the toggle star is visible instead) is what marks
-  // a favorite at rest. The full name rides on a custom tooltip shown
-  // ABOVE the text (data-tooltip-pos) — names longer than the sidebar are
+  // Rename needs a real session file (piRpcInternal.renameSession writes
+  // into the file) — a fresh never-saved draft only offers delete (which
+  // closes its tab). The full name rides on a custom tooltip shown ABOVE
+  // the text (data-tooltip-pos) — names longer than the sidebar are
   // readable without widening it. role=option + tabindex=-1 make rows
   // keyboard-focusable targets for the listbox arrow-key navigation wired
   // in media/chatList.ts.
-  return `<div class="chat-list-row${row.active ? ' active' : ''}${row.favorite ? ' favorite' : ''}" data-id="${esc(row.id)}" role="option" tabindex="-1" aria-selected="${row.active ? 'true' : 'false'}" aria-label="${esc(row.title)}">
+  const canTarget = Boolean(row.sessionPath);
+  const detail = rowDetailText(row, now);
+  return `<div class="chat-list-row${row.active ? ' active' : ''}" data-id="${esc(row.id)}" role="option" tabindex="-1" aria-selected="${row.active ? 'true' : 'false'}" aria-label="${esc(row.title)}">
     <span class="chat-list-row-icon">${ICON_CHAT}</span>
     <span class="chat-list-row-text" data-tooltip="${esc(row.title)}" data-tooltip-pos="above">
-      <span class="chat-list-row-title">${row.favorite ? `<span class="chat-list-row-favbadge">${ICON_STAR_FILLED}</span>` : ''}${esc(row.title)}</span>
+      <span class="chat-list-row-title">${esc(row.title)}</span>
       ${detail || rowSizeWarning(row) ? `<span class="chat-list-row-detail">${detail ? esc(detail) : ''}${rowSizeWarning(row) ? `${detail ? ' · ' : ''}${rowSizeWarning(row)}` : ''}</span>` : ''}
     </span>
     <span class="chat-list-row-actions">
-      <button class="chat-list-row-action" data-act="changes" data-tooltip="Git changes in chat folder" aria-label="Git changes in chat folder">${ICON_DIFF}</button>
-      ${canTarget ? `<button class="chat-list-row-action chat-list-row-fav${row.favorite ? ' is-fav' : ''}" data-act="favorite" data-tooltip="${favTitle}" aria-label="${favTitle}">${row.favorite ? ICON_STAR_FILLED : ICON_STAR}</button>` : ''}
       ${canTarget ? `<button class="chat-list-row-action" data-act="rename" data-tooltip="Rename chat" aria-label="Rename chat">${ICON_PENCIL}</button>` : ''}
       <button class="chat-list-row-action chat-list-row-delete" data-act="delete" data-tooltip="Delete chat" aria-label="Delete chat">${ICON_TRASH}</button>
     </span>

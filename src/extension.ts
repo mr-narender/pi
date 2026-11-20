@@ -359,8 +359,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         context.extensionUri,
         chatTabs,
         recentSessions,
-        folder,
-        context.globalState
+        folder
       );
       context.subscriptions.push(agenticListHost);
     }

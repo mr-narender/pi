@@ -41,19 +41,10 @@ function renameChat(row: ChatListRow): void {
   }
 }
 
-function toggleFavorite(row: ChatListRow): void {
-  // Same session-file requirement as rename: the star is keyed by path.
-  if (row.sessionPath) {
-    vscode.postMessage({ type: 'toggleFavoriteChat', sessionPath: row.sessionPath });
-  }
-}
-
 // Per explicit feedback: hover icons ONLY, no right-click menu. The earlier
 // custom context menu (Open/Rename/Delete) was removed — every action now
 // lives in the hover-revealed .chat-list-row-actions strip.
 const ROW_ACTIONS: Record<string, (row: ChatListRow) => void> = {
-  changes: (row) => vscode.postMessage({ type: 'showChatChanges', rowId: row.id }),
-  favorite: toggleFavorite,
   rename: renameChat,
   delete: deleteChat,
 };

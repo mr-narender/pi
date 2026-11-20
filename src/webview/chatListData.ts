@@ -37,9 +37,6 @@ export interface OpenChatEntry {
 export interface ChatListInput {
   openChats: OpenChatEntry[];
   recent: RecentSessionsState;
-  /** Session file paths the user starred; favorites float to the top of
-   * their block (open or history) and carry a filled star in the UI. */
-  favorites?: ReadonlySet<string>;
   now?: number;
   folders?: string[];
   selectedFolder?: string;
@@ -109,10 +106,8 @@ export function buildChatListModel(input: ChatListInput): ChatListModel {
   const recentItems = filterRecentSessions([...sessions.values()], input.recent.filterText).filter(
     (session) => inFolder(session.cwd)
   );
-  const favorites = input.favorites ?? new Set<string>();
-  const favoriteRank = (path?: string): number => (path && favorites.has(path) ? 1 : 0);
-  // Open chats form one block above history: favorites first, then
-  // newest-first, matching the order of the recents block below.
+  // Open chats form one block above history: newest-first, matching the
+  // order of the recents block below.
   // OpenChatEntry carries no timestamp, so join to recents via sessionFile;
   // unknown time (brand-new session not yet indexed, or recents still
   // loading) sorts to the TOP of the block — a just-created chat is the
@@ -131,10 +126,7 @@ export function buildChatListModel(input: ChatListInput): ChatListModel {
   };
   // Open tabs search the displayed title; indexed history also searches metadata.
   const query = input.recent.filterText.trim().toLowerCase();
-  const sortedOpenChats = [...input.openChats].sort(
-    (a, b) =>
-      favoriteRank(b.sessionFile) - favoriteRank(a.sessionFile) || openChatTime(b) - openChatTime(a)
-  );
+  const sortedOpenChats = [...input.openChats].sort((a, b) => openChatTime(b) - openChatTime(a));
   for (const chat of sortedOpenChats) {
     // Prefer the indexed session's resolved name (first-prompt preview et
     // al) over the raw tab title ("Session 36"); keep the tab title when
@@ -155,7 +147,6 @@ export function buildChatListModel(input: ChatListInput): ChatListModel {
       sizeBytes: record?.sizeBytes,
       active: chat.active,
       isOpen: true,
-      favorite: favoriteRank(chat.sessionFile) === 1,
       openCommand: { resource: chat.resource },
       sessionPath: chat.sessionFile,
     });
@@ -174,17 +165,9 @@ export function buildChatListModel(input: ChatListInput): ChatListModel {
       .filter((path): path is string => Boolean(path))
       .map(canonicalPath)
   );
-  // Favorites sort BEFORE the 20-row cap so a starred chat can never age
-  // out of the list; the stable sort keeps newest-first order inside both
-  // the favorite and non-favorite groups.
   const visibleRecents = recentItems
     .filter((s) => !openSessionFiles.has(canonicalPath(s.path)))
-    .sort(
-      (a, b) =>
-        favoriteRank(b.path) - favoriteRank(a.path) ||
-        b.modifiedAt - a.modifiedAt ||
-        a.path.localeCompare(b.path)
-    )
+    .sort((a, b) => b.modifiedAt - a.modifiedAt || a.path.localeCompare(b.path))
     .slice(0, 20);
   for (const session of visibleRecents) {
     const title = sessionDisplayName(session);
@@ -198,7 +181,6 @@ export function buildChatListModel(input: ChatListInput): ChatListModel {
       sizeBytes: session.sizeBytes,
       active: false,
       isOpen: false,
-      favorite: favoriteRank(session.path) === 1,
       openCommand: { sessionPath: session.path, label: title },
       sessionPath: session.path,
     });
