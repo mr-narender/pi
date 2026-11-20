@@ -47,6 +47,13 @@ export interface PiRpcSettings {
   // Close a hidden idle chat's session after N minutes (0 = never). The tab and
   // transcript stay; the session restarts instantly on focus.
   idleSessionMinutes: number;
+  // Run the Pi runtime DETACHED (its own process group, served over a local IPC
+  // endpoint) so in-flight turns survive a window reload/close and the next
+  // window re-attaches. Default OFF (opt-in); falls back to the child-process
+  // host if IPC setup fails.
+  detachedRuntimeEnabled: boolean;
+  // Idle minutes before an unattached detached runtime with no active turn exits.
+  detachedRuntimeIdleMinutes: number;
 }
 
 export function getSettings(): PiRpcSettings {
@@ -78,6 +85,8 @@ export function getSettings(): PiRpcSettings {
         : 'auto';
     })(),
     idleSessionMinutes: Math.max(0, config.get<number>('idleSessionMinutes', 15)),
+    detachedRuntimeEnabled: config.get<boolean>('detachedRuntime.enabled', false),
+    detachedRuntimeIdleMinutes: Math.max(1, config.get<number>('detachedRuntime.idleMinutes', 10)),
     responseTimeoutMs: config.get<number>('responseTimeoutMs', 15000),
     longRunningTimeoutMs: config.get<number>('longRunningTimeoutMs', 120000),
     // Session replay can contain one large JSONL record (for example an

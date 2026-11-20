@@ -24,7 +24,9 @@ export class SessionRegistry implements vscode.Disposable {
 
   public constructor(
     private readonly logger: DiagnosticsLogger,
-    private readonly sessionIndex?: Pick<SessionIndexService, 'readHistory'>
+    private readonly sessionIndex?: Pick<SessionIndexService, 'readHistory'>,
+    private readonly globalStorageFsPath?: string,
+    private readonly extensionPath?: string
   ) {}
 
   /** Folder-level controller (key = folderUri). Used for drafts / fallback. */
@@ -38,7 +40,14 @@ export class SessionRegistry implements vscode.Disposable {
     if (existing) {
       return existing;
     }
-    const controller = new SessionController(folder, this.logger, undefined, this.sessionIndex);
+    const controller = new SessionController(
+      folder,
+      this.logger,
+      undefined,
+      this.sessionIndex,
+      this.globalStorageFsPath,
+      this.extensionPath
+    );
     this.controllers.set(key, controller);
     this.folderByKey.set(key, folder.uri.toString());
     if (!this.activeKey) {

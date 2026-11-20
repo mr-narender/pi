@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join as pathJoin } from 'node:path';
 import { piLaunchEnvironment, resolvePiLaunch, type PiLaunchPlan } from './piLauncher';
 import {
   spawnExternalPi,
@@ -7,6 +10,11 @@ import {
   type PiProcessHandle,
 } from './piProcess';
 import { getSharedPiHost } from './sharedPiHost';
+import { spawnDetachedRuntime, type DetachedRuntime } from './detachedRuntime/detachedHost';
+import { DetachedIpcConnection } from './detachedRuntime/ipcClient';
+import { acquireLock, findByEnv } from './detachedRuntime/registry';
+import { readTokenFile } from './detachedRuntime/token';
+import { detachedRuntimeBaseDir } from './detachedRuntime/stopRuntimes';
 
 // On Windows the npm-installed `pi` is a `pi.cmd` shim, which Node's spawn cannot
 // execute directly (ENOENT / EINVAL). A shell is required there; on POSIX we keep
@@ -49,11 +57,17 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
   private client: RpcClient | undefined;
   private generation = 0;
   private startEpoch = 0;
+  /** Active detached IPC connection (non-null when using the detached runtime path). */
+  private detachedConnection: DetachedIpcConnection | undefined;
+  /** True when this supervisor is using a detached runtime (not the shared host). */
+  private usingDetached = false;
 
   public constructor(
     private readonly folder: vscode.WorkspaceFolder,
     private readonly logger: DiagnosticsLogger,
-    private readonly settingsOverride?: PiRpcSettings
+    private readonly settingsOverride?: PiRpcSettings,
+    private readonly globalStorageFsPath?: string,
+    private readonly extensionPath?: string
   ) {
     super();
   }
@@ -97,6 +111,42 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
       this.folder.uri.fsPath
     );
     const { env, cwd } = launch;
+    // --- Detached runtime path (opt-in, default OFF) ---
+    // When enabled, spawn or re-attach to a detached runtime that outlives the
+    // extension host. Falls back to the shared host on any failure.
+    if (
+      this.settings.detachedRuntimeEnabled &&
+      launch.sdkRoot &&
+      !!this.settings.sharedRuntime && // dedicated sessions use the existing path
+      this.globalStorageFsPath
+    ) {
+      try {
+        const attached = await this.startDetached(
+          launch.sdkRoot,
+          env,
+          cwd,
+          args,
+          existingSessionPath,
+          startEpoch,
+          options
+        );
+        if (attached) return attached;
+      } catch (error) {
+        if (startEpoch !== this.startEpoch) throw cancelled();
+        // Busy-elsewhere is a user-visible state, not a transient failure — do
+        // NOT fall back to the shared host (that would open a second controller
+        // on the same session file).
+        if (
+          error instanceof Error &&
+          'code' in error &&
+          (error as { code: string }).code === 'SDK_SESSION_BUSY_ELSEWHERE'
+        )
+          throw error;
+        this.logger.warn(
+          `Detached runtime unavailable (${error instanceof Error ? error.message : String(error)}); falling back to shared host`
+        );
+      }
+    }
     // Select the correct SDK backend BEFORE creating the first session.
     const sharedHost = getSharedPiHost();
     if (sharedHost && launch.sdkRoot) {
@@ -242,17 +292,192 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
 
   private async stopClient(): Promise<void> {
     const piProcess = this.piProcess;
+    const detachedConn = this.detachedConnection;
     this.transport = undefined;
     this.client = undefined;
     this.piProcess = undefined;
+    this.detachedConnection = undefined;
     if (!piProcess) {
       return;
     }
+    // For detached sessions: piProcess.stop() sends the close command to the
+    // runtime (telling it to dispose the session). This is the "user explicitly
+    // closes the chat" path.
     await piProcess.stop();
+    // Disconnect the IPC socket after the close command has been sent.
+    if (detachedConn) {
+      detachedConn.dispose();
+    }
   }
 
+  /**
+   * Dispose without stopping: for detached runtimes, disconnect the IPC socket
+   * but do NOT tell the runtime to close the session. The runtime keeps any
+   * in-flight turns running. For non-detached, delegates to stop().
+   */
   public dispose(): void {
-    void this.stop();
+    if (this.usingDetached && this.detachedConnection) {
+      // Extension deactivating: disconnect only, never stop the runtime.
+      this.startEpoch++;
+      const conn = this.detachedConnection;
+      this.transport?.disconnect(new Error('Extension deactivating'));
+      this.transport = undefined;
+      this.client = undefined;
+      this.piProcess = undefined;
+      this.detachedConnection = undefined;
+      conn.dispose();
+    } else {
+      void this.stop();
+    }
+  }
+
+  /** Stable hash of the process environment for one-per-(sdkRoot,envKey) dedup. */
+  private static computeEnvKey(env: NodeJS.ProcessEnv): string {
+    const entries = Object.keys(env)
+      .sort()
+      .filter((key) => env[key] !== undefined)
+      .map((key) => [key, env[key]]);
+    return createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+  }
+
+  /**
+   * Try to start via the detached runtime path: find or spawn a detached runtime
+   * for (sdkRoot, envKey), connect via IPC, and either open a new session or
+   * re-attach to an existing one. Returns the RpcClient on success, or undefined
+   * to signal the caller should fall through to the shared host.
+   */
+  private async startDetached(
+    sdkRoot: string,
+    env: NodeJS.ProcessEnv,
+    cwd: string,
+    args: string[],
+    existingSessionPath: string | undefined,
+    startEpoch: number,
+    options?: { noExtensions?: boolean; offline?: boolean; onClient?: (client: RpcClient) => void }
+  ): Promise<RpcClient | undefined> {
+    const baseDir = detachedRuntimeBaseDir(this.globalStorageFsPath!);
+    const envKey = PiProcessSupervisor.computeEnvKey(env);
+    const channelKey =
+      existingSessionPath ?? `new-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cancelled = () =>
+      Object.assign(new Error('Pi startup was cancelled'), { code: 'SDK_STARTUP_CANCELLED' });
+
+    // Hold the registry lock across find → spawn → add to prevent two windows
+    // from spawning duplicate runtimes for the same (sdkRoot, envKey).
+    let entry: import('./detachedRuntime/registry').RuntimeEntry | undefined;
+    let token: string | undefined;
+    let runtime: DetachedRuntime | undefined;
+
+    const release = acquireLock(baseDir);
+    try {
+      entry = findByEnv(baseDir, sdkRoot, envKey);
+
+      if (entry) {
+        // Try to read the token for the existing runtime.
+        try {
+          token = readTokenFile(entry.tokenFile);
+        } catch {
+          // Token file gone: stale entry; will spawn a new runtime.
+          entry = undefined;
+        }
+      }
+
+      if (!entry) {
+        // No live runtime: spawn a new detached one.
+        if (!this.extensionPath) {
+          throw new Error('extensionPath is required to spawn a detached runtime');
+        }
+        const hostScript = pathJoin(this.extensionPath, 'host', 'pi-multi-host.mjs');
+        if (!existsSync(hostScript)) {
+          this.logger.warn(
+            `Detached runtime host script not found at ${hostScript}; falling back to shared host`
+          );
+          return undefined;
+        }
+        runtime = await spawnDetachedRuntime({
+          hostScript,
+          sdkRoot,
+          envKey,
+          env: { ...env },
+          cwd,
+          runtimeBaseDir: baseDir,
+          idleMs: this.settings.detachedRuntimeIdleMinutes * 60 * 1000,
+        });
+        entry = runtime.entry;
+        token = runtime.token;
+      }
+    } finally {
+      release();
+    }
+
+    if (startEpoch !== this.startEpoch) throw cancelled();
+
+    // Connect to the runtime. When re-using an existing runtime (not freshly
+    // spawned), include the target session key in acks so the server can report
+    // busy-elsewhere upfront without waiting for the open handshake.
+    const conn = new DetachedIpcConnection(sdkRoot);
+    const acks: Record<string, number> = {};
+    if (existingSessionPath && !runtime) acks[channelKey] = 0;
+    const attachResult = await conn.connect(entry.endpoint, token!, acks);
+    if (!attachResult.ok) {
+      conn.dispose();
+      throw new Error(`Detached runtime auth failed: ${attachResult.error ?? 'unknown'}`);
+    }
+
+    if (startEpoch !== this.startEpoch) {
+      conn.dispose();
+      throw cancelled();
+    }
+
+    // Determine whether the runtime already holds this session (re-attach)
+    // or we need to open a new one.
+    let handle: PiProcessHandle;
+    const sessionState = existingSessionPath ? attachResult.sessions[channelKey] : undefined;
+    if (sessionState?.state === 'busy-elsewhere') {
+      // Another VS Code window already controls this session.
+      conn.dispose();
+      throw Object.assign(new Error('This chat is open in another VS Code window'), {
+        code: 'SDK_SESSION_BUSY_ELSEWHERE',
+      });
+    }
+    if (sessionState?.state === 'attached' || sessionState?.state === 'resync') {
+      // Re-attach: the runtime already holds this session.
+      handle = conn.attachSession(channelKey);
+    } else {
+      // Open a new session on the detached runtime.
+      try {
+        handle = await conn.openSession(channelKey, {
+          cwd,
+          sessionFile: existingSessionPath,
+          args,
+        });
+      } catch (openError) {
+        // The runtime refuses open when another client controls this session.
+        if (openError instanceof Error && openError.message === 'SDK_SESSION_BUSY_ELSEWHERE') {
+          conn.dispose();
+          throw Object.assign(new Error('This chat is open in another VS Code window'), {
+            code: 'SDK_SESSION_BUSY_ELSEWHERE',
+          });
+        }
+        throw openError;
+      }
+    }
+
+    if (startEpoch !== this.startEpoch) {
+      conn.dispose();
+      throw cancelled();
+    }
+
+    this.generation += 1;
+    this.detachedConnection = conn;
+    this.usingDetached = true;
+    const client = this.attachClient(handle, 'detached runtime');
+    options?.onClient?.(client);
+    this.logger.info(
+      `Starting Pi for ${this.folder.name} (generation=${this.generation}) via detached runtime ` +
+        `[cwd=${cwd}, session=${existingSessionPath ?? '(new)'}]`
+    );
+    return client;
   }
 
   /** Human-readable remediation for a spawn failure. */
