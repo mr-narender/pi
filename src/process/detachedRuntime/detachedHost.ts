@@ -39,6 +39,12 @@ export interface SpawnDetachedOptions {
   replayMaxCount?: number;
   /** Explicit endpoint path (tests use a short socket path under the sandbox). */
   endpointOverride?: string;
+  /**
+   * When true, skip the addEntry call in spawnDetachedRuntime. The caller
+   * must call addEntry itself. Use when the caller already holds the registry
+   * lock to avoid a 10 s stale-lock spin deadlock.
+   */
+  skipRegistry?: boolean;
 }
 
 export interface DetachedRuntime {
@@ -148,6 +154,9 @@ export async function spawnDetachedRuntime(
     startedAt: Date.now(),
     owner: options.owner ?? {},
   };
-  addEntry(options.runtimeBaseDir, entry);
+  // When the caller already holds the registry lock, it must pass
+  // skipRegistry: true and call addEntry itself to avoid a deadlock
+  // (addEntry acquires the same lock → 10 s stale-lock spin wait).
+  if (!options.skipRegistry) addEntry(options.runtimeBaseDir, entry);
   return { id, endpoint, tokenFile, token, pid: child.pid ?? -1, child, entry };
 }

@@ -51,6 +51,90 @@ validateSdkMetadata(metadata);
 const supportsModelDiscovery = true;
 const modelToolsPersistence = 'after-turn';
 const piImport = (rel) => import(pathToFileURL(path.join(PI_ROOT, rel)).href);
+
+// ── Early IPC listener (before SDK load) ───────────────────────────────
+// When running in detached mode, start the IPC server BEFORE the expensive SDK
+// import so the extension can connect and authenticate immediately. Session opens
+// are queued until the SDK is ready. This cuts cold-start latency from ~12s to
+// ~1s (the SDK load happens in parallel with the client's connect+auth).
+let _earlyIpcReady; // resolved when the SDK is loaded and inbound can be processed
+let _earlyIpcResolve;
+const _earlyQueue = []; // queued inbound lines received before SDK is ready
+if (process.env.PI_HOST_IPC_ENDPOINT) {
+  _earlyIpcReady = new Promise((resolve) => {
+    _earlyIpcResolve = resolve;
+  });
+  const {
+    createRingBuffer,
+    createTurnTracker,
+    createIdleManager,
+    createIpcServer,
+    readTokenFromEnv,
+  } = await import('./detached-ipc.mjs');
+  let token;
+  try {
+    token = readTokenFromEnv(process.env);
+  } catch (err) {
+    process.stderr.write(`pi-host IPC token error: ${(err && err.message) || err}\n`);
+    process.exit(1);
+  }
+  // These are lightweight; no SDK dependency.
+  const _ringBuffer = createRingBuffer({
+    maxBytes: Number(process.env.PI_HOST_REPLAY_MAX_BYTES) || 4 * 1024 * 1024,
+    maxCount: Number(process.env.PI_HOST_REPLAY_MAX_COUNT) || 2000,
+  });
+  const _turns = createTurnTracker();
+  // Stash references so the late IPC block can skip re-creation.
+  globalThis.__earlyIpc = { token, ringBuffer: _ringBuffer, turns: _turns };
+  const _idle = createIdleManager({
+    idleMs: Number(process.env.PI_HOST_IDLE_MS) || 10 * 60 * 1000,
+    hasActiveTurn: () => _turns.hasActive(),
+    // shutdownHost is defined later; wrap in a closure to defer binding.
+    onIdle: () => {
+      if (typeof shutdownHost === 'function') void shutdownHost(0, 'idle-exit');
+    },
+  });
+  globalThis.__earlyIpc.idle = _idle;
+  // outboundSink is not wired yet (defined later); wrap to defer.
+  globalThis.__earlyIpc.outboundSink = (k, obj) => {
+    _turns.observe(k, obj);
+    const seq = _ringBuffer.push(k, JSON.stringify({ k, d: obj }) + '\n');
+    globalThis.__earlyIpc.ipcServer?.emit(k, { k, d: obj }, seq);
+    if (obj && obj.type === 'agent_settled') _idle.turnSettled();
+    if (obj && obj.type === 'session_closed') {
+      _ringBuffer.drop(k);
+      _turns.clear(k);
+    }
+  };
+  // The inbound handler queues lines until the SDK is ready.
+  const earlyInbound = (line) => {
+    // handleInboundEnvelope is defined after the SDK loads; queue until then.
+    if (_earlyIpcResolve) {
+      _earlyQueue.push(line);
+    } else if (typeof handleInboundEnvelope === 'function') {
+      handleInboundEnvelope(line);
+    }
+  };
+  const ipcSrv = createIpcServer({
+    endpoint: process.env.PI_HOST_IPC_ENDPOINT,
+    token,
+    onInbound: earlyInbound,
+    replayFor: (k, ack) => _ringBuffer.since(k, ack),
+    onClientAttached: () => _idle.clientAttached(),
+    onClientDetached: () => _idle.clientDetached(),
+  });
+  globalThis.__earlyIpc.ipcServer = ipcSrv;
+  try {
+    await ipcSrv.listen();
+    process.stderr.write(`pi-host IPC listening on ${process.env.PI_HOST_IPC_ENDPOINT}\n`);
+  } catch (err) {
+    process.stderr.write(`pi-host IPC listen failed: ${(err && err.message) || err}\n`);
+    process.exit(1);
+  }
+  // Note: idle.start() is deferred to the late IPC block (after SDK loads).
+  // Starting it here would fire the idle timer during SDK load, causing
+  // premature shutdown for short idleMs values.
+}
 const sdk = await piImport('dist/index.js');
 validateSdkApi(sdk);
 // --- Documented internal SDK imports (no public factory available) ---
@@ -1799,70 +1883,29 @@ for (const sig of process.platform === 'win32'
 }
 
 // ── Detached IPC mode ──────────────────────────────────────────────────────
-// When PI_HOST_IPC_ENDPOINT is set, serve the {k,d} protocol over a local IPC
-// endpoint (Unix domain socket / Windows named pipe) instead of stdio, keep a
-// bounded per-session replay ring buffer, and self-exit only when there has
-// been no attached client for PI_HOST_IDLE_MS AND no session has an active turn.
+// When PI_HOST_IPC_ENDPOINT is set, the IPC server was started early (before
+// SDK load) to cut cold-start latency. Here we wire the outboundSink and flush
+// any queued inbound messages that arrived during the SDK load.
 // Wrapped in an async IIFE so the host-shutdown unit test (which runs the
 // tail of this file in a VM that has no `import` and a mock `process`) parses
 // and executes it harmlessly: the guard short-circuits before any await.
 void (async () => {
   if (!process.env?.PI_HOST_IPC_ENDPOINT) return;
-  const {
-    createRingBuffer,
-    createTurnTracker,
-    createIdleManager,
-    createIpcServer,
-    readTokenFromEnv,
-  } = await import('./detached-ipc.mjs');
-
-  // Read the token ONCE at startup and keep it in memory. If the token is
-  // unusable the runtime refuses to start (fail-closed).
-  let token;
-  try {
-    token = readTokenFromEnv(process.env);
-  } catch (err) {
-    process.stderr.write(`pi-host IPC token error: ${(err && err.message) || err}\n`);
+  const early = globalThis.__earlyIpc;
+  if (!early) {
+    // Fallback: early IPC was not set up (should not happen in production).
+    process.stderr.write('pi-host: early IPC not initialized; exiting\n');
     process.exit(1);
   }
-
-  const ringBuffer = createRingBuffer({
-    maxBytes: Number(process.env.PI_HOST_REPLAY_MAX_BYTES) || 4 * 1024 * 1024,
-    maxCount: Number(process.env.PI_HOST_REPLAY_MAX_COUNT) || 2000,
-  });
-  const turns = createTurnTracker();
-  let ipcServer;
-  const idle = createIdleManager({
-    idleMs: Number(process.env.PI_HOST_IDLE_MS) || 10 * 60 * 1000,
-    hasActiveTurn: () => turns.hasActive(),
-    onIdle: () => void shutdownHost(0, 'idle-exit'),
-  });
-  // Every outbound frame is recorded for replay and routed to the controlling
-  // client (if any). A detached client never loses events: they stay buffered.
-  outboundSink = (k, obj) => {
-    turns.observe(k, obj);
-    const seq = ringBuffer.push(k, serializeJsonLine({ k, d: obj }));
-    ipcServer?.emit(k, { k, d: obj }, seq);
-    if (obj && obj.type === 'agent_settled') idle.turnSettled();
-    if (obj && obj.type === 'session_closed') {
-      ringBuffer.drop(k);
-      turns.clear(k);
-    }
-  };
-  ipcServer = createIpcServer({
-    endpoint: process.env.PI_HOST_IPC_ENDPOINT,
-    token,
-    onInbound: handleInboundEnvelope,
-    replayFor: (k, ack) => ringBuffer.since(k, ack),
-    onClientAttached: () => idle.clientAttached(),
-    onClientDetached: () => idle.clientDetached(),
-  });
-  try {
-    await ipcServer.listen();
-    process.stderr.write(`pi-host IPC listening on ${process.env.PI_HOST_IPC_ENDPOINT}\n`);
-  } catch (err) {
-    process.stderr.write(`pi-host IPC listen failed: ${(err && err.message) || err}\n`);
-    process.exit(1);
+  // Wire the outboundSink to use the early-created ring buffer and IPC server.
+  outboundSink = early.outboundSink;
+  // Signal that the SDK is ready and flush queued inbound messages.
+  _earlyIpcResolve = undefined;
+  for (const line of _earlyQueue) {
+    handleInboundEnvelope(line);
   }
-  idle.start();
+  _earlyQueue.length = 0;
+  // Start the idle timer now that the SDK is ready. Starting it earlier
+  // would cause premature exit during the SDK load phase.
+  early.idle.start();
 })();

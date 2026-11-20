@@ -12,7 +12,14 @@ import {
 import { getSharedPiHost } from './sharedPiHost';
 import { spawnDetachedRuntime, type DetachedRuntime } from './detachedRuntime/detachedHost';
 import { DetachedIpcConnection } from './detachedRuntime/ipcClient';
-import { acquireLock, findAllBySdkRoot, findByEnv, readRegistry } from './detachedRuntime/registry';
+import {
+  acquireLock,
+  findAllBySdkRoot,
+  findByEnv,
+  pidAlive,
+  readRegistry,
+  writeRegistry,
+} from './detachedRuntime/registry';
 import { readTokenFile } from './detachedRuntime/token';
 import {
   readSessionLock,
@@ -51,6 +58,8 @@ interface ParkedDetachedDraft {
   envKey: string;
   args: string[];
   channelKey: string;
+  /** Runtime process pid for liveness checks. */
+  runtimePid: number;
 }
 
 /** Map key: `${cwd}\0${envKey}` */
@@ -102,10 +111,12 @@ export async function warmDetachedRuntime(opts: {
   idleMinutes: number;
   logger: { info(msg: string): void; warn(msg: string): void };
 }): Promise<void> {
+  const t0 = Date.now();
   const baseDir = detachedRuntimeBaseDir(opts.globalStorageFsPath);
   const envKey = PiProcessSupervisor.computeEnvKey(opts.env);
 
   const release = acquireLock(baseDir);
+  opts.logger.info(`[detached-timing] warm: lock acquired: ${Date.now() - t0}ms`);
   try {
     // --- Duplicate identity awareness (safe: never signal from warmup) ---
     // If multiple live runtimes share the same identity, log but do NOT
@@ -147,14 +158,24 @@ export async function warmDetachedRuntime(opts: {
       opts.logger.warn('Detached runtime host script not found; skipping sidebar warmup');
       return;
     }
-    await spawnDetachedRuntime({
+    opts.logger.info(`[detached-timing] warm: spawn-start: ${Date.now() - t0}ms`);
+    const rt = await spawnDetachedRuntime({
       hostScript,
       sdkRoot: opts.sdkRoot,
       envKey,
       env: { ...opts.env },
       runtimeBaseDir: baseDir,
       idleMs: opts.idleMinutes * 60 * 1000,
+      skipRegistry: true, // caller holds the lock
     });
+    // Write entry directly (we already hold the registry lock).
+    const runtimes = readRegistry(baseDir).filter(
+      (e) =>
+        e.id !== rt.entry.id && !(e.sdkRoot === rt.entry.sdkRoot && e.envKey === rt.entry.envKey)
+    );
+    runtimes.push(rt.entry);
+    writeRegistry(baseDir, runtimes);
+    opts.logger.info(`[detached-timing] warm: spawn-done: ${Date.now() - t0}ms`);
     opts.logger.info('Detached runtime pre-spawned for sidebar warmup');
   } finally {
     release();
@@ -498,10 +519,13 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     startEpoch: number,
     options?: { noExtensions?: boolean; offline?: boolean; onClient?: (client: RpcClient) => void }
   ): Promise<RpcClient | undefined> {
+    const t0 = Date.now();
     const baseDir = detachedRuntimeBaseDir(this.globalStorageFsPath!);
     const envKey = PiProcessSupervisor.computeEnvKey(env);
     const cancelled = () =>
       Object.assign(new Error('Pi startup was cancelled'), { code: 'SDK_STARTUP_CANCELLED' });
+    const elapsed = (label: string) =>
+      this.logger.info(`[detached-timing] ${label}: ${Date.now() - t0}ms`);
 
     // --- Parked draft adoption (default New Chat only) ---
     // Mirror sharedPiHost: synchronous reservation, stale replacement on mismatch,
@@ -514,7 +538,9 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
         parkedDetachedDrafts.delete(draftKey);
         const argsMatch =
           JSON.stringify(args) === JSON.stringify(draft.args) && draft.sdkRoot === sdkRoot;
-        if (argsMatch) {
+        // Liveness gate: verify the IPC connection is still open and the runtime pid is alive.
+        const draftAlive = argsMatch && draft.conn.isConnected && pidAlive(draft.runtimePid);
+        if (draftAlive) {
           this.generation += 1;
           this.detachedConnection = draft.conn;
           this.usingDetached = true;
@@ -527,13 +553,18 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           this.scheduleDetachedPrewarm(sdkRoot, env, envKey, cwd, args);
           return client;
         }
-        // Stale: launch identity changed.
-        this.logger.info('Replacing stale parked detached draft (launch identity changed)');
+        // Stale: launch identity changed, connection dead, or pid dead.
+        this.logger.info(
+          argsMatch
+            ? 'Discarding dead parked detached draft (connection/pid not alive)'
+            : 'Replacing stale parked detached draft (launch identity changed)'
+        );
         void draft.handle.stop();
         draft.conn.dispose();
       }
     }
 
+    elapsed('draft-check');
     const channelKey =
       existingSessionPath ?? `new-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
@@ -577,6 +608,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     let token: string | undefined;
     let runtime: DetachedRuntime | undefined;
 
+    elapsed('session-holder-check');
     const release = acquireLock(baseDir);
     try {
       entry = findByEnv(baseDir, sdkRoot, envKey);
@@ -603,6 +635,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           );
           return undefined;
         }
+        elapsed('spawn-start');
         runtime = await spawnDetachedRuntime({
           hostScript,
           sdkRoot,
@@ -611,13 +644,23 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           cwd,
           runtimeBaseDir: baseDir,
           idleMs: this.settings.detachedRuntimeIdleMinutes * 60 * 1000,
+          skipRegistry: true, // caller holds the lock
         });
+        // Write entry directly (we already hold the registry lock).
+        const existing = readRegistry(baseDir).filter(
+          (e) =>
+            e.id !== runtime!.entry.id &&
+            !(e.sdkRoot === runtime!.entry.sdkRoot && e.envKey === runtime!.entry.envKey)
+        );
+        existing.push(runtime!.entry);
+        writeRegistry(baseDir, existing);
         entry = runtime.entry;
         token = runtime.token;
       }
     } finally {
       release();
     }
+    elapsed('registry-lock-released');
 
     if (startEpoch !== this.startEpoch) throw cancelled();
 
@@ -628,6 +671,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     const acks: Record<string, number> = {};
     if (existingSessionPath && !runtime) acks[channelKey] = 0;
     const attachResult = await conn.connect(entry.endpoint, token!, acks);
+    elapsed('connect-auth');
     if (!attachResult.ok) {
       conn.dispose();
       throw new Error(`Detached runtime auth failed: ${attachResult.error ?? 'unknown'}`);
@@ -674,6 +718,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
           sessionFile: existingSessionPath,
           args,
         });
+        elapsed('open-session');
         // Write the session lock after successful open.
         if (existingSessionPath) {
           writeSessionLock(existingSessionPath, {
@@ -705,6 +750,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     this.detachedSessionFile = existingSessionPath;
     const client = this.attachClient(handle, 'detached runtime');
     options?.onClient?.(client);
+    elapsed('attached');
     this.logger.info(
       `Starting Pi for ${this.folder.name} (generation=${this.generation}) via detached runtime ` +
         `[cwd=${cwd}, session=${existingSessionPath ?? '(new)'}]`
@@ -740,6 +786,11 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
     const candidates = findAllBySdkRoot(baseDir, sdkRoot);
     for (const candidate of candidates) {
       if (startEpoch !== this.startEpoch) throw cancelled();
+      // Fast pid-alive check: skip entries whose process is already dead.
+      if (!pidAlive(candidate.pid)) {
+        this.logger.info(`Skipping stale registry entry pid=${candidate.pid} (process dead)`);
+        continue;
+      }
       let token: string;
       try {
         token = readTokenFile(candidate.tokenFile);
@@ -831,7 +882,7 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
       const channelKey = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       // Build default new-chat args (no session file).
       const handle = await conn.openSession(channelKey, { cwd, args });
-      parkedDetachedDrafts.set(draftKey, {
+      const draft: ParkedDetachedDraft = {
         handle,
         conn,
         cwd,
@@ -839,6 +890,15 @@ export class PiProcessSupervisor extends TypedEmitter implements vscode.Disposab
         envKey,
         args,
         channelKey,
+        runtimePid: entry.pid,
+      };
+      parkedDetachedDrafts.set(draftKey, draft);
+      // Evict the draft immediately if the runtime connection drops.
+      conn.onClose(() => {
+        if (parkedDetachedDrafts.get(draftKey) === draft) {
+          parkedDetachedDrafts.delete(draftKey);
+          this.logger.info(`Evicted parked detached draft for ${cwd} (connection closed)`);
+        }
       });
       this.logger.info(`Parked detached draft for ${cwd}`);
     } catch (error) {
