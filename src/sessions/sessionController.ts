@@ -1146,9 +1146,18 @@ export class SessionController implements vscode.Disposable {
           error instanceof Error &&
           'code' in error &&
           (error.code === 'SDK_STARTUP_MODEL_AMBIGUOUS' ||
-            error.code === 'SDK_SESSION_BUSY_ELSEWHERE')
+            error.code === 'SDK_SESSION_BUSY_ELSEWHERE' ||
+            error.code === 'SDK_SESSION_LOCKED')
         )
           break;
+        // After a detached re-attach failure (e.g. 'session not open'), a small
+        // backoff prevents hammering the same runtime in a tight loop and gives
+        // the host time to finish any pending session-open/close operations.
+        if (error instanceof Error && /session not open/i.test(error.message)) {
+          const backoffMs = Math.min(200 * Math.pow(2, index), 2000);
+          this.logger.info(`Detached re-attach backoff: ${backoffMs}ms before next attempt`);
+          await new Promise((r) => setTimeout(r, backoffMs));
+        }
       }
     }
 
@@ -1394,6 +1403,8 @@ export class SessionController implements vscode.Disposable {
         `tree=${this.state.tree.length} (lazy), ` +
         `session=${this.state.state.sessionFile ?? '(none)'}`
     );
+    // Lock the session file for this detached runtime (new chats learn it here).
+    this.supervisor.noteSessionFile(this.state.state.sessionFile);
     // We now hold the full active-branch transcript at the current file size.
     await this.syncFileReadOffset();
     // (Re)arm the native file watcher so terminal (TUI) appends to THIS session
@@ -2531,7 +2542,19 @@ export class SessionController implements vscode.Disposable {
     this.changeEmitter.fire(this.state);
     cancelModelOperations(this);
     this.disarmSessionFileWatcher();
-    void this.stop();
+    if (this.supervisor.isDetached) {
+      // Detached path: do the controller-side cleanup that stop() does
+      // (epoch, IDE requests, flags) WITHOUT telling the runtime to close.
+      // The runtime keeps in-flight turns running; supervisor.dispose()
+      // below disconnects the IPC socket only.
+      this.startEpoch = (this.startEpoch ?? 0) + 1;
+      for (const request of this.ideRequests?.keys() ?? []) request.abort();
+      this.stopping = true;
+    } else {
+      // Non-detached (shared host / kill-switch-off): stop sends the close
+      // command to the runtime, matching #44 behaviour.
+      void this.stop();
+    }
     this.supervisor.dispose();
     this.changeEmitter.dispose();
     this.extensionUiEmitter.dispose();

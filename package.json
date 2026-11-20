@@ -604,8 +604,8 @@
         },
         "piRpc.detachedRuntime.enabled": {
           "type": "boolean",
-          "default": false,
-          "description": "Run the Pi runtime DETACHED from the VS Code window (its own process group, served over a local Unix socket / Windows named pipe) so an in-flight turn keeps running when you reload or close the window, and the next window re-attaches to the same sessions. Default off (opt-in); falls back to the in-window runtime if the IPC endpoint can't be created. No network ports are opened; a per-runtime 256-bit token (0600 file) gates every connection."
+          "default": true,
+          "description": "Pi runs in a background runtime (its own process group, served over a local Unix socket / Windows named pipe) so replies survive network drops, window reloads and window closes — the next window re-attaches to the same sessions automatically. Set to false as a kill switch to fall back to the in-window host (identical to the pre-detached behaviour). No network ports are opened; a per-runtime 256-bit token (0600 file) gates every connection."
         },
         "piRpc.detachedRuntime.idleMinutes": {
           "type": "number",

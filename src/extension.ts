@@ -22,8 +22,9 @@ import { promptChatName, trackSessionName } from './commands/nameCommand';
 import { initSharedPiHost, disposeSharedPiHost } from './process/sharedPiHost';
 import {
   detachedRuntimeBaseDir,
-  stopBackgroundRuntimes,
+  stopBackgroundRuntimesAndWait,
 } from './process/detachedRuntime/stopRuntimes';
+import { disposeParkedDetachedDrafts } from './process/supervisor';
 import { TurnReview } from './review/turnReview';
 import { syncApprovalGateForWorkspace, toggleApprovalGateMode } from './review/approvalGate';
 import { pickChatModel } from './commands/modelPicker';
@@ -249,6 +250,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.Uri.joinPath(context.globalStorageUri, 'v8-cache').fsPath
   );
   context.subscriptions.push({ dispose: () => disposeSharedPiHost() });
+  context.subscriptions.push({ dispose: () => disposeParkedDetachedDrafts() });
   // Sidebar discovery must never resolve project resources or create a session.
   // Tabs warm their own exact launch in the supervisor after opening.
   let sidebarWarmRequested = false;
@@ -265,11 +267,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           .then(async (sdkRoot) => {
             const { mkdir } = await import('node:fs/promises');
             await mkdir(context.globalStorageUri.fsPath, { recursive: true });
-            sharedHost.warmPool(undefined, {
-              cwd: context.globalStorageUri.fsPath,
-              sdkRoot,
-              env: piLaunchEnvironment(settings),
-            });
+            if (settings.detachedRuntimeEnabled) {
+              // Pre-spawn the detached runtime (folder-neutral: no session, no
+              // project resources) so the first New Chat connects instantly.
+              // Use resolveDetachedLaunchIdentity to get the same env/envKey
+              // that startDetached will use (includes PI_MANAGED_INSTALL_ROOT).
+              const { warmDetachedRuntime, resolveDetachedLaunchIdentity } = await import(
+                './process/supervisor.js'
+              );
+              const identity = resolveDetachedLaunchIdentity(settings);
+              await warmDetachedRuntime({
+                sdkRoot: identity.sdkRoot ?? sdkRoot,
+                env: identity.env,
+                globalStorageFsPath: context.globalStorageUri.fsPath,
+                extensionPath: context.extensionPath,
+                idleMinutes: settings.detachedRuntimeIdleMinutes,
+                logger,
+              });
+            } else {
+              sharedHost.warmPool(undefined, {
+                cwd: context.globalStorageUri.fsPath,
+                sdkRoot,
+                env: piLaunchEnvironment(settings),
+              });
+            }
           })
           .catch((error: unknown) => logger.warn(`Runtime warmup unavailable: ${String(error)}`));
       },
@@ -1355,10 +1376,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // the per-user registry. Idle ones also exit on their own after idleMinutes.
   registrations.set('piRpc.stopBackgroundRuntimes', async () => {
     const baseDir = detachedRuntimeBaseDir(context.globalStorageUri.fsPath);
-    const { stopped } = stopBackgroundRuntimes(baseDir);
+    const { stopped, forced } = await stopBackgroundRuntimesAndWait(baseDir);
+    const detail = forced > 0 ? ` (${forced} force-killed)` : '';
     void vscode.window.showInformationMessage(
       stopped > 0
-        ? `Stopped ${stopped} background Pi runtime${stopped === 1 ? '' : 's'}.`
+        ? `Stopped ${stopped} background Pi runtime${stopped === 1 ? '' : 's'}${detail}.`
         : 'No background Pi runtimes are running.'
     );
   });

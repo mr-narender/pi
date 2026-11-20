@@ -8,7 +8,7 @@ import { piLaunchEnvironment } from '../../src/process/piLauncher';
 import { selectActiveBranchMessages } from '../../src/sessions/activeBranch';
 import {
   detachedRuntimeBaseDir,
-  stopBackgroundRuntimes,
+  stopBackgroundRuntimesAndWait,
 } from '../../src/process/detachedRuntime/stopRuntimes';
 
 // Step 2 integration tests for the detached-runtime supervisor:
@@ -27,7 +27,8 @@ function shortTmp(): string {
 async function buildSupervisorBundle() {
   const result = await build({
     stdin: {
-      contents: "export { PiProcessSupervisor } from './src/process/supervisor';",
+      contents:
+        "export { PiProcessSupervisor, disposeParkedDetachedDrafts } from './src/process/supervisor';",
       resolveDir: REPO_ROOT,
     },
     bundle: true,
@@ -153,7 +154,7 @@ function makeFixtureStubs(
 function loadBundle(
   bundleText: string,
   stubs: ReturnType<typeof makeFixtureStubs>
-): { PiProcessSupervisor: any } {
+): { PiProcessSupervisor: any; disposeParkedDetachedDrafts: () => void } {
   const mod = { exports: {} as any };
   new Function('require', 'module', 'exports', bundleText)(
     (name: string) => {
@@ -182,6 +183,7 @@ test(
   async () => {
     const fixture = await createNativeFixture('compact');
     const globalStorage = shortTmp();
+    let disposeParked: (() => void) | undefined;
     try {
       const plan = await nativeSdkHostPlan(fixture, 'shared');
       const planEnv = plan.env as NodeJS.ProcessEnv;
@@ -189,7 +191,8 @@ test(
       const tracker = { sharedHostUsed: false };
       const bundleText = await buildSupervisorBundle();
       const stubs = makeFixtureStubs(sdkRoot, planEnv, plan.cwd, tracker);
-      const { PiProcessSupervisor } = loadBundle(bundleText, stubs);
+      const { PiProcessSupervisor, disposeParkedDetachedDrafts } = loadBundle(bundleText, stubs);
+      disposeParked = disposeParkedDetachedDrafts;
       const logLines: string[] = [];
       const logger = makeLogger(logLines);
       const settings = makeSettings();
@@ -306,7 +309,12 @@ test(
       await sup2.stop();
     } finally {
       try {
-        stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+        disposeParked?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
       } catch {
         /* ignore */
       }
@@ -324,6 +332,7 @@ test(
   async () => {
     const fixture = await createNativeFixture('compact');
     const globalStorage = shortTmp();
+    let disposeParked: (() => void) | undefined;
     try {
       const plan = await nativeSdkHostPlan(fixture, 'shared');
       const planEnv = plan.env as NodeJS.ProcessEnv;
@@ -331,7 +340,8 @@ test(
       const tracker = { sharedHostUsed: false };
       const bundleText = await buildSupervisorBundle();
       const stubs = makeFixtureStubs(sdkRoot, planEnv, plan.cwd, tracker);
-      const { PiProcessSupervisor } = loadBundle(bundleText, stubs);
+      const { PiProcessSupervisor, disposeParkedDetachedDrafts } = loadBundle(bundleText, stubs);
+      disposeParked = disposeParkedDetachedDrafts;
       const logLines: string[] = [];
       const logger = makeLogger(logLines);
       const settings = makeSettings();
@@ -399,7 +409,12 @@ test(
       );
     } finally {
       try {
-        stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+        disposeParked?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
       } catch {
         /* ignore */
       }
@@ -478,7 +493,7 @@ test(
         }
       }
       try {
-        stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+        await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
       } catch {
         /* ignore */
       }
@@ -494,6 +509,7 @@ test(
   async () => {
     const fixture = await createNativeFixture('compact');
     const globalStorage = shortTmp();
+    let disposeParked: (() => void) | undefined;
     try {
       const plan = await nativeSdkHostPlan(fixture, 'shared');
       const planEnv = plan.env as NodeJS.ProcessEnv;
@@ -501,7 +517,8 @@ test(
       const tracker = { sharedHostUsed: false };
       const bundleText = await buildSupervisorBundle();
       const stubs = makeFixtureStubs(sdkRoot, planEnv, plan.cwd, tracker);
-      const { PiProcessSupervisor } = loadBundle(bundleText, stubs);
+      const { PiProcessSupervisor, disposeParkedDetachedDrafts } = loadBundle(bundleText, stubs);
+      disposeParked = disposeParkedDetachedDrafts;
       const logLines: string[] = [];
       const logger = makeLogger(logLines);
       const settings = makeSettings();
@@ -551,7 +568,12 @@ test(
       await sup1.stop();
     } finally {
       try {
-        stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+        disposeParked?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
       } catch {
         /* ignore */
       }

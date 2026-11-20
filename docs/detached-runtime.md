@@ -1,4 +1,15 @@
-# Detached runtime (opt-in: piRpc.detachedRuntime.enabled)
+# Detached runtime (on by default)
+
+Pi runs in a background runtime so replies survive network drops, window reloads
+and closes. The next VS Code window re-attaches automatically.
+
+- **Kill switch**: set `piRpc.detachedRuntime.enabled` to `false` to fall back
+  to the in-window host (identical to the pre-detached behaviour).
+- **Idle exit**: `piRpc.detachedRuntime.idleMinutes` (default 10) — a detached
+  runtime exits on its own after this many minutes with no attached window and no
+  active turn.
+- **Manual stop**: run **Pi: Stop background runtimes** from the Command Palette
+  to SIGTERM every live detached runtime immediately.
 
 ## Security fix round
 

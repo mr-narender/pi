@@ -9,7 +9,7 @@ import { piLaunchEnvironment } from '../../src/process/piLauncher';
 import { selectActiveBranchMessages } from '../../src/sessions/activeBranch';
 import {
   detachedRuntimeBaseDir,
-  stopBackgroundRuntimes,
+  stopBackgroundRuntimesAndWait,
 } from '../../src/process/detachedRuntime/stopRuntimes';
 
 // Integration tests for the detached-runtime supervisor re-attach flow.
@@ -34,7 +34,8 @@ function shortTmp(): string {
 async function buildSupervisorBundle() {
   const result = await build({
     stdin: {
-      contents: "export { PiProcessSupervisor } from './src/process/supervisor';",
+      contents:
+        "export { PiProcessSupervisor, disposeParkedDetachedDrafts } from './src/process/supervisor';",
       resolveDir: REPO_ROOT,
     },
     bundle: true,
@@ -91,6 +92,7 @@ test(
   async () => {
     const fixture = await createNativeFixture('compact');
     const globalStorage = shortTmp();
+    let disposeParked: (() => void) | undefined;
     try {
       const plan = await nativeSdkHostPlan(fixture, 'shared');
       const planEnv = plan.env as NodeJS.ProcessEnv;
@@ -135,7 +137,8 @@ test(
         mod.exports
       );
 
-      const { PiProcessSupervisor } = mod.exports;
+      const { PiProcessSupervisor, disposeParkedDetachedDrafts } = mod.exports;
+      disposeParked = disposeParkedDetachedDrafts;
       const logLines: string[] = [];
       const logger = {
         info: (msg: string) => logLines.push(msg),
@@ -300,9 +303,14 @@ test(
 
       await sup2.stop();
     } finally {
-      // Kill any detached runtimes so the test process can exit.
+      // Clear module-level parked-draft state, then wait for runtimes to exit.
       try {
-        stopBackgroundRuntimes(detachedRuntimeBaseDir(globalStorage));
+        disposeParked?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await stopBackgroundRuntimesAndWait(detachedRuntimeBaseDir(globalStorage));
       } catch {
         /* ignore */
       }

@@ -48,9 +48,9 @@ export interface PiRpcSettings {
   // transcript stay; the session restarts instantly on focus.
   idleSessionMinutes: number;
   // Run the Pi runtime DETACHED (its own process group, served over a local IPC
-  // endpoint) so in-flight turns survive a window reload/close and the next
-  // window re-attaches. Default OFF (opt-in); falls back to the child-process
-  // host if IPC setup fails.
+  // endpoint) so in-flight turns survive network drops, window reloads and
+  // closes, and the next window re-attaches. Default ON; set to false as a kill
+  // switch to fall back to the in-window host.
   detachedRuntimeEnabled: boolean;
   // Idle minutes before an unattached detached runtime with no active turn exits.
   detachedRuntimeIdleMinutes: number;
@@ -85,7 +85,7 @@ export function getSettings(): PiRpcSettings {
         : 'auto';
     })(),
     idleSessionMinutes: Math.max(0, config.get<number>('idleSessionMinutes', 15)),
-    detachedRuntimeEnabled: config.get<boolean>('detachedRuntime.enabled', false),
+    detachedRuntimeEnabled: config.get<boolean>('detachedRuntime.enabled', true),
     detachedRuntimeIdleMinutes: Math.max(1, config.get<number>('detachedRuntime.idleMinutes', 10)),
     responseTimeoutMs: config.get<number>('responseTimeoutMs', 15000),
     longRunningTimeoutMs: config.get<number>('longRunningTimeoutMs', 120000),

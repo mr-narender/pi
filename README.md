@@ -224,8 +224,14 @@ clear fallback message in the picker.
   `piRpc.autoCompact.percent` defaults to **75%** of the model's detected context window.
   The old `piRpc.autoCompactThreshold` setting is deprecated.
 - **CodeLens Enabled** — the inline “Ask Pi” action above functions/methods.
+- **Detached Runtime → Enabled** — on by default: Pi runs in a background
+  runtime so replies survive network drops, window reloads and closes. Set to
+  `false` as a kill switch to fall back to the in-window host.
+- **Detached Runtime → Idle Minutes** — a detached runtime exits after this many
+  idle minutes with no attached window and no active turn (default 10). Use
+  **Pi: Stop background runtimes** to stop all runtimes immediately.
 - **Remote → Broker URL / Host Secret** — required for **Connect a phone**.
-- **Pi Executable Path** — set this if `pi` isn’t on your `PATH`.
+- **Pi Executable Path** — set this if `pi` isn't on your `PATH`.
 
 ## Troubleshooting
 

@@ -13,6 +13,10 @@ import type { PiProcessHandle } from '../piProcess';
 export interface AttachSessionState {
   state: 'attached' | 'resync' | 'busy-elsewhere';
   seq?: number;
+  /** When the host resolved a different channel key (e.g. the client asked for
+   *  a session file path but the host stores the session under the original
+   *  channel key), this is the host's actual key. Use it for all further I/O. */
+  resolvedKey?: string;
 }
 
 export interface AttachResult {
@@ -62,7 +66,21 @@ export class DetachedIpcConnection {
       }
     | undefined;
 
+  private _connected = false;
+  /** Emits when the socket closes or errors after a successful connect. */
+  private _onClose: (() => void) | undefined;
+
   public constructor(public readonly sdkRoot?: string) {}
+
+  /** True when the socket is connected and not destroyed. */
+  public get isConnected(): boolean {
+    return this._connected && !!this.socket && !this.socket.destroyed;
+  }
+
+  /** Register a callback invoked once when the connection drops. */
+  public onClose(cb: () => void): void {
+    this._onClose = cb;
+  }
 
   private ensureChannel(key: string): Channel {
     let channel = this.channels.get(key);
@@ -87,10 +105,19 @@ export class DetachedIpcConnection {
     const socket = connect(endpoint);
     this.socket = socket;
     await once(socket, 'connect');
+    this._connected = true;
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => this.onData(chunk));
-    socket.on('error', () => this.failAll(new Error('ipc socket error')));
-    socket.on('close', () => this.failAll(new Error('ipc socket closed')));
+    socket.on('error', () => {
+      this._connected = false;
+      this.failAll(new Error('ipc socket error'));
+      this._onClose?.();
+    });
+    socket.on('close', () => {
+      this._connected = false;
+      this.failAll(new Error('ipc socket closed'));
+      this._onClose?.();
+    });
     const result = new Promise<AttachResult>((resolve, reject) => {
       this.pendingAttach = resolve;
       this.attachTimer = setTimeout(() => {
@@ -306,6 +333,9 @@ export class DetachedIpcConnection {
     for (const channel of this.channels.values()) {
       channel.onOpen?.(false, error.message);
       channel.onOpen = undefined;
+      // Signal exit so attachClient's onExit triggers transport disconnect.
+      channel.onExit?.(1, 'SIGKILL');
+      channel.onExit = undefined;
       channel.stdout.push(null);
     }
   }
@@ -315,6 +345,8 @@ export class DetachedIpcConnection {
    * Simulates extension-host death — the runtime keeps running in-flight turns.
    */
   public dispose(): void {
+    this._connected = false;
+    this._onClose = undefined;
     const socket = this.socket;
     this.socket = undefined;
     this.authState = undefined;
